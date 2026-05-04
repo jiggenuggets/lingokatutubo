@@ -108,8 +108,22 @@ class PipelineService:
             
             if not layout_data:
                 raise Exception("Failed to extract layout")
-            
+
             job.metadata["layout_blocks"] = len(layout_data)
+
+            # Persist a structured view of the document for the /structure endpoint.
+            # This runs before translation so it's available even if downstream phases fail.
+            try:
+                structure_path = self._build_and_save_structure(
+                    job_id=job_id,
+                    job=job,
+                    file_type=file_type,
+                    layout_data=layout_data,
+                    input_file_path=input_file_path,
+                )
+                job.metadata["structure_file"] = structure_path
+            except Exception as struct_err:
+                print(f"[Pipeline] Failed to build structure.json: {struct_err}")
 
             # Phase 2.5: Auto-detect source language if requested
             if source_language == "auto":
@@ -259,6 +273,124 @@ class PipelineService:
         
         return translations
     
+    # ------------------------------------------------------------------
+    # Structure JSON (consumed by GET /structure/{job_id})
+    # ------------------------------------------------------------------
+
+    def _build_and_save_structure(
+        self,
+        job_id: str,
+        job: "JobStatus",
+        file_type: FileType,
+        layout_data: list,
+        input_file_path: str,
+    ) -> str:
+        """
+        Build the per-job structure.json from extracted layout data.
+
+        For scanned PDFs (and images), real OCR is not yet implemented, so we
+        return empty page blocks plus an explicit warning rather than the
+        placeholder/mock layout used by the rest of the pipeline.
+        """
+        detected_type = self._format_detected_type(file_type, job.detection_type)
+        is_scanned = job.detection_type == DetectionType.SCANNED
+        warnings: list = []
+        pages_out: list = []
+
+        if is_scanned:
+            warnings.append(
+                "OCR is not yet implemented. Scanned PDFs and images cannot "
+                "be extracted to structured text blocks at this time."
+            )
+            # Use source page geometry where possible (PDF only — pure images
+            # don't have a well-defined point size here).
+            if file_type == FileType.PDF:
+                try:
+                    import fitz
+                    doc = fitz.open(input_file_path)
+                    for i in range(doc.page_count):
+                        p = doc[i]
+                        pages_out.append({
+                            "page_number": i + 1,
+                            "width": p.rect.width,
+                            "height": p.rect.height,
+                            "blocks": [],
+                        })
+                    doc.close()
+                except Exception as e:
+                    warnings.append(f"Could not read source page dimensions: {e}")
+        else:
+            for page_data in layout_data:
+                page_idx = page_data.get("page", 0)
+                blocks_out = []
+                block_counter = 0
+
+                for block in page_data.get("blocks", []):
+                    if block.get("type") != "text":
+                        continue
+                    block_counter += 1
+                    text = " ".join(
+                        line.get("text", "").strip()
+                        for line in block.get("lines", [])
+                        if line.get("text", "").strip()
+                    ).strip()
+                    if not text:
+                        continue
+
+                    try:
+                        lang_result = self.language_service.detect_language(text)
+                        detected_lang = lang_result.get("language", "unknown")
+                    except Exception:
+                        detected_lang = "unknown"
+
+                    bbox = block.get("bbox") or []
+                    blocks_out.append({
+                        "block_id": f"p{page_idx + 1}_b{block_counter}",
+                        "bbox": list(bbox),
+                        "source_text": text,
+                        "detected_language": detected_lang,
+                        "ocr_confidence": None,
+                    })
+
+                pages_out.append({
+                    "page_number": page_idx + 1,
+                    "width": page_data.get("width"),
+                    "height": page_data.get("height"),
+                    "blocks": blocks_out,
+                })
+
+        structure = {
+            "job_id": job_id,
+            "status": job.status,
+            "detected_type": detected_type,
+            "pages": pages_out,
+            "warnings": warnings,
+        }
+
+        structure_path = self.get_structure_path(job_id)
+        os.makedirs(os.path.dirname(structure_path), exist_ok=True)
+        with open(structure_path, "w", encoding="utf-8") as f:
+            json.dump(structure, f, ensure_ascii=False, indent=2)
+        print(f"[Pipeline] structure.json saved: {structure_path}")
+        return structure_path
+
+    @staticmethod
+    def _format_detected_type(
+        file_type: FileType,
+        detection_type: Optional[DetectionType],
+    ) -> str:
+        if file_type == FileType.PDF:
+            return "digital_pdf" if detection_type == DetectionType.DIGITAL else "scanned_pdf"
+        if file_type == FileType.DOCX:
+            return "docx"
+        if file_type in (FileType.JPG, FileType.PNG):
+            return "scanned_image"
+        return str(file_type.value) if file_type else "unknown"
+
+    def get_structure_path(self, job_id: str) -> str:
+        """Path to the per-job structure.json."""
+        return os.path.join(self.file_service.get_job_dir(job_id), "structure.json")
+
     def _create_mock_layout_for_scanned(self, file_path: str) -> list:
         """
         Create mock layout for scanned documents

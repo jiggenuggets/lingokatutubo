@@ -20,6 +20,7 @@ import fastapi
 import fastapi.middleware.cors
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+import json
 import uuid
 from typing import Optional
 
@@ -202,6 +203,51 @@ async def get_status(job_id: str) -> dict:
         "is_mixed_language": meta.get("is_mixed_language", False),
         "metadata": meta,
     }
+
+
+@app.get("/structure/{job_id}")
+async def get_structure(job_id: str):
+    """
+    Return the structured document JSON for a job.
+
+    Shape: {job_id, status, detected_type, pages: [{page_number, width, height,
+    blocks: [{block_id, bbox, source_text, detected_language, ocr_confidence}]}],
+    warnings: []}.
+
+    For digital PDFs, ocr_confidence is null. For scanned PDFs/images, blocks
+    are empty and a warning is included since OCR is not yet implemented.
+    """
+    structure_path = pipeline_service.get_structure_path(job_id)
+    job_status = pipeline_service.get_job_status(job_id)
+
+    if not os.path.exists(structure_path):
+        if not job_status:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Job not found", "detail": f"No job with id {job_id}"},
+            )
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "Structure not yet available",
+                "detail": f"Job status is {job_status.status}; extraction has not produced structure.json yet",
+            },
+        )
+
+    try:
+        with open(structure_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to read structure.json", "detail": str(e)},
+        )
+
+    # Reflect the live job state rather than the snapshot taken at extraction time.
+    if job_status:
+        data["status"] = job_status.status
+
+    return data
 
 
 @app.get("/preview/{job_id}")
@@ -388,6 +434,7 @@ async def root():
         "endpoints": {
             "POST /translate": "Upload document for translation",
             "GET /status/{job_id}": "Get translation job status",
+            "GET /structure/{job_id}": "Get structured page/block JSON for a job",
             "GET /preview/{job_id}": "Get preview images",
             "GET /download/{job_id}": "Download translated document",
             "POST /quick-translate": "Translate a single phrase",
