@@ -26,10 +26,23 @@ class OCRService:
     extraction. Internally we render at `dpi` and scale pixel boxes back.
     """
 
-    def __init__(self, dpi: int = 200, lang: str = "eng"):
+    def __init__(
+        self,
+        dpi: int = 200,
+        lang: str = "eng",
+        preprocess: bool = True,
+        denoise: bool = True,
+        detect_orientation: bool = True,
+    ):
         self.dpi = dpi
         self.lang = lang
+        self.preprocess_enabled = preprocess
+        self.denoise_enabled = denoise
+        self.detect_orientation_enabled = detect_orientation
         self._verified: Optional[bool] = None
+        # OSD support is checked lazily and cached. None = unknown, False = OSD
+        # data missing or unusable, True = working.
+        self._osd_available: Optional[bool] = None
 
         # Honor an explicit binary path if the user provides one.
         tess_cmd = os.environ.get("TESSERACT_CMD")
@@ -67,6 +80,163 @@ class OCRService:
             return False
 
     # ------------------------------------------------------------------
+    # Preprocessing + orientation
+    # ------------------------------------------------------------------
+
+    def _preprocess(self, img):
+        """Grayscale + autocontrast + light denoise.
+
+        Every operation here MUST preserve pixel dimensions so the existing
+        DPI->points scaling stays valid. No resizing, no rotation.
+        """
+        if not self.preprocess_enabled:
+            return img
+
+        from PIL import ImageFilter, ImageOps
+
+        try:
+            if img.mode != "L":
+                img = img.convert("L")
+        except Exception as e:
+            print(f"[OCR] grayscale failed: {e}")
+            return img
+
+        try:
+            img = ImageOps.autocontrast(img, cutoff=2)
+        except Exception as e:
+            print(f"[OCR] autocontrast failed: {e}")
+
+        if self.denoise_enabled:
+            try:
+                # Mild median filter knocks out salt-and-pepper noise from
+                # low-quality scans; size=3 is small enough not to hurt
+                # already-clean text noticeably.
+                img = img.filter(ImageFilter.MedianFilter(size=3))
+            except Exception as e:
+                print(f"[OCR] median denoise failed: {e}")
+
+        return img
+
+    def _detect_rotation_deg(self, img) -> int:
+        """Return clockwise rotation needed to make the image upright.
+
+        Returns 0 / 90 / 180 / 270, or 0 if OSD is unavailable or fails.
+        OSD requires Tesseract's `osd.traineddata` and a sufficient amount
+        of text to be reliable; callers must treat 0 as "unknown" too.
+        """
+        if not self.detect_orientation_enabled:
+            return 0
+        if self._osd_available is False:
+            return 0
+        try:
+            import pytesseract
+            osd = pytesseract.image_to_osd(img, config="--psm 0")
+            self._osd_available = True
+            for line in osd.splitlines():
+                if line.startswith("Rotate:"):
+                    return int(line.split(":", 1)[1].strip()) % 360
+            return 0
+        except Exception as e:
+            # Distinguish "osd.traineddata is not installed" (cache False so
+            # we don't keep paying the cost) from "OSD ran but couldn't
+            # decide on this image" (sparse page — try again on next page).
+            msg = str(e).lower()
+            permanent = (
+                "osd.traineddata" in msg
+                or "tessdata" in msg
+                or "failed loading" in msg
+                or "please make sure the tessdata" in msg
+            )
+            if permanent:
+                self._osd_available = False
+                print(f"[OCR] OSD permanently disabled: {e}")
+            else:
+                print(f"[OCR] OSD skipped on this page: {e}")
+            return 0
+
+    def _apply_rotation(self, img, rotate_deg: int):
+        """Rotate the image to upright if we can do so safely.
+
+        Returns (image, applied_deg, warning_or_none). We only physically
+        rotate for 180 degrees — that case has trivial bbox inversion and
+        preserves dimensions. For 90 / 270 we leave the image alone and
+        surface a warning, because bbox transforms under 90-deg rotation
+        require swapping page dimensions and we want to keep the JSON
+        contract stable.
+        """
+        if rotate_deg == 0:
+            return img, 0, None
+        if rotate_deg == 180:
+            from PIL import Image
+            return img.transpose(Image.ROTATE_180), 180, None
+        return img, 0, (
+            f"Page appears rotated by {rotate_deg} degrees. "
+            "OCR was run without rotation; results may be poor."
+        )
+
+    @staticmethod
+    def _flip_page_layout_180(page_layout: Dict[str, Any]) -> Dict[str, Any]:
+        """Map bboxes from a 180-rotated frame back to the original frame.
+
+        Dimensions are unchanged under 180-degree rotation, so we only
+        need to flip each bbox: (x0, y0, x1, y1) -> (W-x1, H-y1, W-x0, H-y0).
+        """
+        page_w = page_layout.get("width") or 0.0
+        page_h = page_layout.get("height") or 0.0
+
+        def flip(bbox):
+            if not bbox or len(bbox) != 4:
+                return bbox
+            x0, y0, x1, y1 = bbox
+            return [page_w - x1, page_h - y1, page_w - x0, page_h - y0]
+
+        for block in page_layout.get("blocks", []):
+            block["bbox"] = flip(block.get("bbox"))
+            for line in block.get("lines", []):
+                line["bbox"] = flip(line.get("bbox"))
+        return page_layout
+
+    def _ocr_image(self, img, page_idx: int, page_w_pt: float, page_h_pt: float, scale: float) -> Dict[str, Any]:
+        """Preprocess, orient, OCR, and build per-page layout for one image."""
+        import pytesseract
+        from pytesseract import Output
+
+        warnings: List[str] = []
+
+        try:
+            img = self._preprocess(img)
+        except Exception as e:
+            print(f"[OCR] preprocessing failed: {e}")
+
+        rotate_deg = self._detect_rotation_deg(img)
+        img, applied_deg, rot_warning = self._apply_rotation(img, rotate_deg)
+        if rot_warning:
+            warnings.append(rot_warning)
+
+        try:
+            data = pytesseract.image_to_data(
+                img, output_type=Output.DICT, lang=self.lang
+            )
+        except Exception as e:
+            print(f"[OCR] page {page_idx + 1} failed: {e}")
+            return {
+                "page": page_idx,
+                "width": page_w_pt,
+                "height": page_h_pt,
+                "blocks": [],
+                "ocr_error": str(e),
+            }
+
+        page_layout = self._build_page_layout(
+            page_idx, page_w_pt, page_h_pt, data, scale
+        )
+        if applied_deg == 180:
+            page_layout = self._flip_page_layout_180(page_layout)
+        if warnings:
+            page_layout["ocr_warning"] = "; ".join(warnings)
+        return page_layout
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -80,9 +250,7 @@ class OCRService:
         self._ensure_available()
 
         import fitz  # PyMuPDF
-        import pytesseract
         from PIL import Image
-        from pytesseract import Output
 
         pages_data: List[Dict[str, Any]] = []
         scale = 72.0 / float(self.dpi)
@@ -98,23 +266,8 @@ class OCRService:
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
 
-                try:
-                    data = pytesseract.image_to_data(
-                        img, output_type=Output.DICT, lang=self.lang
-                    )
-                except Exception as e:
-                    print(f"[OCR] page {page_idx + 1} failed: {e}")
-                    pages_data.append({
-                        "page": page_idx,
-                        "width": page_w_pt,
-                        "height": page_h_pt,
-                        "blocks": [],
-                        "ocr_error": str(e),
-                    })
-                    continue
-
-                pages_data.append(self._build_page_layout(
-                    page_idx, page_w_pt, page_h_pt, data, scale
+                pages_data.append(self._ocr_image(
+                    img, page_idx, page_w_pt, page_h_pt, scale
                 ))
         finally:
             doc.close()
@@ -125,9 +278,7 @@ class OCRService:
         """OCR a single image file (treated as a one-page document)."""
         self._ensure_available()
 
-        import pytesseract
         from PIL import Image
-        from pytesseract import Output
 
         img = Image.open(image_path)
         if img.mode != "RGB":
@@ -139,20 +290,7 @@ class OCRService:
         page_h_pt = img.height * 72.0 / float(self.dpi)
         scale = 72.0 / float(self.dpi)
 
-        try:
-            data = pytesseract.image_to_data(
-                img, output_type=Output.DICT, lang=self.lang
-            )
-        except Exception as e:
-            return [{
-                "page": 0,
-                "width": page_w_pt,
-                "height": page_h_pt,
-                "blocks": [],
-                "ocr_error": str(e),
-            }]
-
-        return [self._build_page_layout(0, page_w_pt, page_h_pt, data, scale)]
+        return [self._ocr_image(img, 0, page_w_pt, page_h_pt, scale)]
 
     # ------------------------------------------------------------------
     # Internals

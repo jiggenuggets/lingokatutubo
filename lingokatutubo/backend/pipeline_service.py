@@ -366,6 +366,9 @@ class PipelineService:
             page_err = page_data.get("ocr_error")
             if page_err:
                 warnings.append(f"Page {page_idx + 1}: OCR error: {page_err}")
+            page_warn = page_data.get("ocr_warning")
+            if page_warn:
+                warnings.append(f"Page {page_idx + 1}: {page_warn}")
 
             for block in page_data.get("blocks", []):
                 if block.get("type") != "text":
