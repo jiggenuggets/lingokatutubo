@@ -227,24 +227,34 @@ class PipelineService:
             job.progress = 75
             
             output_pdf_path = self.file_service.get_output_path(job_id, "translated.pdf")
+            layout_warnings: List[str] = []
             
             if file_type == FileType.PDF:
                 success = self.reconstruction_service.reconstruct_pdf(
                     input_file_path,
                     layout_data,
                     translations,
-                    output_pdf_path
+                    output_pdf_path,
+                    is_scanned=job.detection_type == DetectionType.SCANNED,
+                    layout_warnings=layout_warnings,
                 )
             else:
                 # For DOCX/images, create a simple PDF output
                 success = self._create_output_pdf(
                     layout_data,
                     translations,
-                    output_pdf_path
+                    output_pdf_path,
+                    input_file_path=input_file_path,
+                    file_type=file_type,
+                    layout_warnings=layout_warnings,
                 )
             
             if not success:
                 raise Exception("Failed to reconstruct PDF")
+
+            if layout_warnings:
+                job.metadata["layout_warnings"] = layout_warnings
+                self._append_structure_warnings(job_id, layout_warnings)
 
             if not os.path.exists(output_pdf_path):
                 raise Exception(f"Output PDF was not created at: {output_pdf_path}")
@@ -257,10 +267,10 @@ class PipelineService:
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
             original_previews = self.reconstruction_service.create_preview_images(
-                input_file_path, preview_dir, max_pages=2
+                input_file_path, preview_dir, max_pages=2, prefix="original"
             )
             translated_previews = self.reconstruction_service.create_preview_images(
-                output_pdf_path, preview_dir, max_pages=2
+                output_pdf_path, preview_dir, max_pages=2, prefix="translated"
             )
             
             job.metadata["preview_original"] = original_previews
@@ -413,7 +423,7 @@ class PipelineService:
                 "Install Tesseract OCR to enable scanned-PDF extraction."
             )
 
-        total_blocks = 0
+        total_text_blocks = 0
         for page_data in layout_data:
             page_idx = page_data.get("page", 0)
             blocks_out = []
@@ -427,52 +437,70 @@ class PipelineService:
                 add_warning(f"Page {page_idx + 1}: {page_warn}")
 
             for block in page_data.get("blocks", []):
-                if block.get("type") != "text":
-                    continue
+                block_type = block.get("type", "unknown")
                 block_counter += 1
-                text = " ".join(
-                    line.get("text", "").strip()
-                    for line in block.get("lines", [])
-                    if line.get("text", "").strip()
-                ).strip()
-                if not text:
-                    continue
 
-                try:
-                    lang_result = self.language_service.detect_language(text)
-                    detected_lang = lang_result.get("language", "unknown")
-                except Exception:
-                    detected_lang = "unknown"
+                if block_type == "text":
+                    text = " ".join(
+                        line.get("text", "").strip()
+                        for line in block.get("lines", [])
+                        if line.get("text", "").strip()
+                    ).strip()
+                    if not text:
+                        continue
 
-                # Only scanned input carries a meaningful confidence value.
-                ocr_conf = None
-                raw_conf = block.get("confidence")
-                if is_scanned and raw_conf is not None:
                     try:
-                        ocr_conf = round(float(raw_conf), 4)
-                    except (TypeError, ValueError):
-                        ocr_conf = None
+                        lang_result = self.language_service.detect_language(text)
+                        detected_lang = lang_result.get("language", "unknown")
+                    except Exception:
+                        detected_lang = "unknown"
+
+                    # Only scanned input carries a meaningful confidence value.
+                    ocr_conf = None
+                    raw_conf = block.get("confidence")
+                    if is_scanned and raw_conf is not None:
+                        try:
+                            ocr_conf = round(float(raw_conf), 4)
+                        except (TypeError, ValueError):
+                            ocr_conf = None
+
+                    bbox = block.get("bbox") or []
+                    blocks_out.append({
+                        "block_id": f"p{page_idx + 1}_b{block_counter}",
+                        "block_type": "text",
+                        "type": "text",
+                        "bbox": self._json_safe_value(bbox),
+                        "source_text": text,
+                        "detected_language": detected_lang,
+                        "ocr_confidence": ocr_conf,
+                        "lines": self._structure_lines(block),
+                    })
+                    total_text_blocks += 1
+                    continue
 
                 bbox = block.get("bbox") or []
                 blocks_out.append({
                     "block_id": f"p{page_idx + 1}_b{block_counter}",
-                    "bbox": list(bbox),
-                    "source_text": text,
-                    "detected_language": detected_lang,
-                    "ocr_confidence": ocr_conf,
+                    "block_type": block_type,
+                    "type": block_type,
+                    "bbox": self._json_safe_value(bbox),
+                    "source_text": None,
+                    "detected_language": None,
+                    "ocr_confidence": None,
+                    "metadata": self._block_metadata(block),
                 })
-                total_blocks += 1
 
             pages_out.append({
                 "page_number": page_idx + 1,
                 "width": page_data.get("width"),
                 "height": page_data.get("height"),
+                "rotation": page_data.get("rotation", 0),
                 "blocks": blocks_out,
             })
 
         # If scanned and OCR found nothing, still surface page geometry so
         # the frontend can render an empty preview, and add a clear warning.
-        if is_scanned and total_blocks == 0:
+        if is_scanned and total_text_blocks == 0:
             if not pages_out and file_type == FileType.PDF:
                 try:
                     import fitz
@@ -526,37 +554,177 @@ class PipelineService:
         """Path to the per-job structure.json."""
         return os.path.join(self.file_service.get_job_dir(job_id), "structure.json")
 
+    @staticmethod
+    def _json_safe_value(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): PipelineService._json_safe_value(item)
+                for key, item in value.items()
+                if key not in {"image", "mask"}
+            }
+        if isinstance(value, (list, tuple)):
+            return [PipelineService._json_safe_value(item) for item in value]
+        return str(value)
+
+    def _block_metadata(self, block: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = {}
+        for key, value in block.items():
+            if key in {"type", "bbox", "lines", "image", "mask"}:
+                continue
+            metadata[key] = self._json_safe_value(value)
+        return metadata
+
+    def _structure_lines(self, block: Dict[str, Any]) -> List[Dict[str, Any]]:
+        lines_out: List[Dict[str, Any]] = []
+        for idx, line in enumerate(block.get("lines", []), start=1):
+            text = (line.get("text") or "").strip()
+            if not text:
+                continue
+            line_out = {
+                "line_id": idx,
+                "text": text,
+                "bbox": self._json_safe_value(line.get("bbox") or []),
+                "font": line.get("font", ""),
+                "size": line.get("size"),
+                "color": self._json_safe_value(line.get("color")),
+            }
+            if line.get("confidence") is not None:
+                line_out["ocr_confidence"] = line.get("confidence")
+            if line.get("spans"):
+                line_out["spans"] = self._json_safe_value(line.get("spans"))
+            lines_out.append(line_out)
+        return lines_out
+
+    def _append_structure_warnings(self, job_id: str, warnings: List[str]) -> None:
+        """Append reconstruction/layout warnings to structure.json."""
+        if not warnings:
+            return
+        structure_path = self.get_structure_path(job_id)
+        if not os.path.exists(structure_path):
+            return
+        try:
+            with open(structure_path, "r", encoding="utf-8") as f:
+                structure = json.load(f)
+
+            existing = structure.get("warnings", [])
+            if not isinstance(existing, list):
+                existing = []
+            for warning in warnings:
+                if warning not in existing:
+                    existing.append(warning)
+            structure["warnings"] = existing
+
+            with open(structure_path, "w", encoding="utf-8") as f:
+                json.dump(structure, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Pipeline] Failed to append layout warnings to structure.json: {e}")
+
     def _create_output_pdf(
         self,
         layout_data: list,
         translations: Dict[str, str],
-        output_path: str
+        output_path: str,
+        input_file_path: Optional[str] = None,
+        file_type: Optional[FileType] = None,
+        layout_warnings: Optional[List[str]] = None,
     ) -> bool:
         """
-        Create a simple PDF from layout data with translated text
+        Create a simple PDF from layout data with translated text.
+
+        For image inputs, the original raster image is placed as the page
+        background before translated OCR text is overlaid.
         """
         try:
             import fitz
             doc = fitz.open()
-            page = doc.new_page()
-            
-            y_pos = 50
-            for page_data in layout_data:
+            page_items = layout_data or [{
+                "page": 0,
+                "width": 612,
+                "height": 792,
+                "blocks": [],
+            }]
+
+            for page_idx, page_data in enumerate(page_items):
+                try:
+                    page_width = float(page_data.get("width") or 612)
+                    page_height = float(page_data.get("height") or 792)
+                except Exception:
+                    page_width = 612
+                    page_height = 792
+
+                page = doc.new_page(width=page_width, height=page_height)
+
+                if (
+                    page_idx == 0
+                    and input_file_path
+                    and file_type in (FileType.JPG, FileType.PNG)
+                    and os.path.exists(input_file_path)
+                ):
+                    try:
+                        page.insert_image(
+                            page.rect,
+                            filename=input_file_path,
+                            keep_proportion=False,
+                            overlay=False,
+                        )
+                    except Exception as e:
+                        layout_warnings = layout_warnings if layout_warnings is not None else []
+                        if f"Page {page_idx + 1}: failed to preserve source image background: {e}" not in layout_warnings:
+                            layout_warnings.append(
+                                f"Page {page_idx + 1}: failed to preserve source image background: {e}"
+                            )
+
                 blocks = page_data.get("blocks", [])
                 
-                for block in blocks:
+                for block_idx, block in enumerate(blocks, start=1):
                     if block.get("type") != "text":
                         continue
                     
                     lines = block.get("lines", [])
                     
-                    for line in lines:
-                        original = line.get("text", "")
-                        translated = translations.get(original, original)
+                    for line_idx, line in enumerate(lines, start=1):
+                        original = (line.get("text") or "").strip()
+                        translated = (
+                            translations.get(original)
+                            or translations.get(original.lower())
+                            or original
+                        )
                         
-                        if translated:
-                            page.insert_text((50, y_pos), translated, fontsize=11)
-                            y_pos += 20
+                        if not translated or translated.strip() == original:
+                            continue
+
+                        rect = self.reconstruction_service._rect_from_bbox(
+                            line.get("bbox"),
+                            page.rect,
+                            padding=0.75,
+                        )
+                        if rect is None:
+                            if layout_warnings is not None:
+                                layout_warnings.append(
+                                    f"Page {page_idx + 1}, block {block_idx}, line {line_idx}: "
+                                    "invalid text bbox; translated text was skipped."
+                                )
+                            continue
+
+                        page.draw_rect(
+                            rect,
+                            color=(1, 1, 1),
+                            fill=(1, 1, 1),
+                            width=0,
+                            overlay=True,
+                        )
+                        self.reconstruction_service._insert_text_in_rect(
+                            page,
+                            rect,
+                            translated,
+                            line,
+                            layout_warnings,
+                            page_idx + 1,
+                            block_idx,
+                            line_idx,
+                        )
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             doc.save(output_path)
