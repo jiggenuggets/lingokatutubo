@@ -3,6 +3,8 @@
 This file explains how to work on the LingoKatutubo system safely and effectively.
 It is meant for coding agents and developers who need a practical map of the project.
 
+> **Map the rules below to current code.** Some responsibilities described here (OCR service, side-by-side viewer, uncertainty service, per-block language detection) are **Planned**, not yet implemented. Before you act on any rule that names a module, check whether the file exists. The live status is in [README.md](../README.md).
+
 ---
 
 ## 1. What the system is

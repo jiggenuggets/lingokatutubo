@@ -16,7 +16,7 @@ The first priority is a working document-processing system.
 - Do not replace working modules just because another library looks better.
 - Do not remove layout-preservation logic to make translation easier.
 - Do not claim features are working unless code and output confirm them.
-- Do n  images, and layout into one vague “OCR works” statement.
+- Do not collapse tables, images, and layout into one vague "OCR works" statement.
 - Do not silently change Bagobo-Tagabawa orthography.
 - Do not invent translations when the dataset is uncertain.
 - Do not mark jobs complete if the output file is missing.

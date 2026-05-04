@@ -1,6 +1,35 @@
 # LingoKatutubo - System Architecture Diagram
 
-## Overall System Flow
+> ⚠️ **This diagram is the target architecture.** Several boxes below describe components that are **Planned**, not yet implemented. Read the legend before trusting any box.
+
+## Implementation Legend (verified 2026-05-04)
+
+| Component in diagram | Status |
+|---|---|
+| Frontend Upload UI | **Implemented** |
+| Frontend Progress Modal (multi-step) | **Planned** — current UI is just an inline spinner |
+| Frontend Side-by-Side Viewer | **Planned** — no `translation-viewer.tsx` exists |
+| Backend `POST /translate`, `GET /status`, `GET /preview`, `GET /download`, `GET /preview-image` | **Implemented** |
+| Pipeline Phase 1 — Detection | **Implemented** (text-layer probe) |
+| Pipeline Phase 2 — Extraction (DIGITAL) | **Partially Implemented** — text + bbox + font name only |
+| Pipeline Phase 2 — OCR Service (SCANNED) | **Planned** — placeholder block only; Tesseract/PaddleOCR not wired |
+| Pipeline Phase 3 — Language Detection (block-level) | **Partially Implemented** — document-level only today |
+| Pipeline Phase 4 — Translation cascade (exact → normalized → fuzzy → dictionary → unknown) | **Partially Implemented** — exact + fuzzy + word-by-word; no `[UNKNOWN]` marker, no surfaced confidence |
+| Pipeline Phase 4 — Uncertainty Service | **Planned** — no `uncertainty_service.py` |
+| Pipeline Phase 5 — Reconstruction (image/line/shape preservation) | **Planned** — current code only re-inserts text with white-box overlay |
+| Pipeline Phase 5 — Reconstruction (text reinsertion) | **Implemented** — at line bbox, hardcoded 11pt, default font |
+| Pipeline Phase 6 — Preview generation | **Implemented** (first 2 pages) |
+| Pipeline Phase 7 — Completion check (output exists) | **Implemented** |
+| Job queue (Celery/RQ) | **Planned** — currently `asyncio.create_task` |
+| Object storage (S3/GCS) | **Planned** — currently local filesystem under `tempfile.gettempdir()/bagobo-uploads/jobs/` |
+| Database for job tracking | **Planned** — currently in-memory dict |
+| Pretrained model translation (ByT5 / NLLB) | **Planned** — see model strategy audit; not invoked at runtime |
+
+The diagram below shows the **target** architecture. Boxes labelled with services that don't exist yet (OCR Service, Uncertainty Service, Side-by-Side Viewer, Document Translation Progress Modal) are aspirational.
+
+---
+
+## Overall System Flow (target)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -319,21 +348,27 @@ jobs/
 
 ## Technology Stack
 
-Frontend:
-  • Next.js 14+ (React framework)
+Frontend (current):
+  • Next.js 15 + React 19
   • TypeScript
-  • Tailwind CSS
+  • Tailwind CSS v4
   • Lucide React (icons)
+  • SWR (installed; not currently used in the translate flow)
 
-Backend:
-  • FastAPI (Python web framework)
-  • PyMuPDF (fitz) - PDF manipulation
-  • python-docx - DOCX handling
-  • Pillow - Image processing
-  • Tesseract - OCR
-  • ReportLab - PDF generation
-  • fuzzywuzzy - Fuzzy matching
-  • langdetect - Language detection
+Backend (current):
+  • FastAPI (Python 3.11)
+  • PyMuPDF (fitz) — PDF read/extract/reconstruct/preview
+  • python-docx — DOCX paragraph extraction
+  • Pillow — image handling
+  • ReportLab — installed; not actively used (PyMuPDF handles PDF output)
+  • rapidfuzz — fuzzy matching in the translation cascade
+  • langdetect — non-Tagabawa language detection
+  • openpyxl — optional dataset loader path
+  • pytesseract — declared in requirements but **not imported anywhere** (Planned for OCR)
+
+Backend (planned but not installed):
+  • PaddleOCR (preferred) or Tesseract (fallback) — for the SCANNED branch
+  • transformers + sentencepiece + torch — for ByT5-small / NLLB-200 distilled, when fine-tuning is wired
 
 Storage:
   • Local filesystem (development)
@@ -348,24 +383,22 @@ Job Queue:
   • Celery/RQ (production)
 
 
-## Key Innovation: Layout Preservation
+## Key Goal: Layout-Aware Reconstruction
 
-Traditional translation rewrites the entire document.
-LingoKatutubo preserves the exact visual layout:
+Traditional translation rewrites the entire document. LingoKatutubo *attempts* to preserve the original visual structure:
 
-❌ Traditional Approach:
-   Extract all text → Translate → Create new document
-   Result: Lost layout, no images, reformatted
+Target approach:
+  1. Separate text from non-text objects
+  2. Keep non-text objects at original positions
+  3. Translate only text
+  4. Place translated text into the original bboxes
 
-✅ LingoKatutubo Approach:
-   1. Separate text from non-text
-   2. Keep non-text at exact positions
-   3. Translate only text
-   4. Place translated text in original boxes
-   Result: Perfect visual match with translated content
+> **Honest claim today:** the system performs **partial layout preservation** for digital PDFs. It re-inserts translated text at the original line bbox, but does **not** yet preserve images, lines, or shapes through reconstruction (the white overlay can erase them), and does not adapt font/size/color/alignment. Do not describe the output as a "perfect visual match" or "exact replica" in any defense or report — see [claude.md](claude.md) "Layout preservation truthfulness" and [agent.md](agent.md) "Honest current claim".
 
-This is critical for educational materials where:
-  • Diagrams must align with text
-  • Cultural symbols stay intact
+This still matters for educational materials because:
+  • Diagrams should align with text
+  • Cultural symbols should stay intact
   • Page structure aids learning
   • Teacher annotations remain valid
+
+— but those goals are work-in-progress, not delivered guarantees.
