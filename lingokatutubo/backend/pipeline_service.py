@@ -16,6 +16,7 @@ from extraction_service import get_extraction_service
 from reconstruction_service import get_reconstruction_service
 from translation_dataset import get_translation_dataset
 from language_detection_service import get_language_detection_service
+from ocr_stage import OCRUnavailableError, get_ocr_service
 
 
 class JobStatus:
@@ -43,6 +44,7 @@ class PipelineService:
         self.reconstruction_service = get_reconstruction_service()
         self.translation_dataset = get_translation_dataset()
         self.language_service = get_language_detection_service(self.translation_dataset)
+        self.ocr_service = get_ocr_service()
 
         self.jobs = {}  # job_id -> JobStatus
     
@@ -95,24 +97,43 @@ class PipelineService:
             
             layout_data = []
             
+            ocr_unavailable_msg: Optional[str] = None
+
             if job.detection_type == DetectionType.DIGITAL:
                 if file_type == FileType.PDF:
                     layout_data = self.extraction_service.extract_pdf_text_and_layout(input_file_path)
                 elif file_type == FileType.DOCX:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
             else:
-                # For scanned documents, OCR would be called here
-                # Placeholder: create mock layout data
-                print(f"[Pipeline] SCANNED document - OCR placeholder")
-                layout_data = self._create_mock_layout_for_scanned(input_file_path)
-            
-            if not layout_data:
-                raise Exception("Failed to extract layout")
+                # Scanned input: route through Tesseract OCR. No mock fallback.
+                try:
+                    if file_type == FileType.PDF:
+                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR")
+                        layout_data = self.ocr_service.extract_pdf_text_and_layout(input_file_path)
+                    elif file_type in (FileType.JPG, FileType.PNG):
+                        print(f"[Pipeline] Image input - running Tesseract OCR")
+                        layout_data = self.ocr_service.extract_image_text_and_layout(input_file_path)
+                    else:
+                        layout_data = []
+                except OCRUnavailableError as e:
+                    ocr_unavailable_msg = str(e)
+                    print(f"[Pipeline] OCR unavailable: {e}")
+                    layout_data = []
+                except Exception as e:
+                    print(f"[Pipeline] OCR error: {e}")
+                    ocr_unavailable_msg = f"OCR error: {e}"
+                    layout_data = []
+
+            # layout_data may legitimately be empty for scanned input when OCR
+            # finds no text — defer the failure to after structure.json is saved
+            # so callers can inspect the warnings.
+            if layout_data is None:
+                layout_data = []
 
             job.metadata["layout_blocks"] = len(layout_data)
 
             # Persist a structured view of the document for the /structure endpoint.
-            # This runs before translation so it's available even if downstream phases fail.
+            # Always runs (even on empty/failed OCR) so callers see the warnings.
             try:
                 structure_path = self._build_and_save_structure(
                     job_id=job_id,
@@ -120,10 +141,35 @@ class PipelineService:
                     file_type=file_type,
                     layout_data=layout_data,
                     input_file_path=input_file_path,
+                    ocr_unavailable_msg=ocr_unavailable_msg,
                 )
                 job.metadata["structure_file"] = structure_path
             except Exception as struct_err:
                 print(f"[Pipeline] Failed to build structure.json: {struct_err}")
+
+            # Now enforce: we need at least one extractable text block to
+            # continue. Fail loudly with an actionable message rather than
+            # silently producing placeholder output.
+            text_block_count = sum(
+                1
+                for page in layout_data
+                for block in page.get("blocks", [])
+                if block.get("type") == "text"
+                and any((line.get("text") or "").strip() for line in block.get("lines", []))
+            )
+            if text_block_count == 0:
+                if ocr_unavailable_msg:
+                    raise Exception(
+                        f"OCR engine unavailable: {ocr_unavailable_msg}. "
+                        "structure.json was written with a warning."
+                    )
+                if job.detection_type == DetectionType.SCANNED:
+                    raise Exception(
+                        "OCR produced no text from this scanned document. "
+                        "Page may be blank, low-quality, or in an unsupported "
+                        "language. structure.json contains warnings."
+                    )
+                raise Exception("Failed to extract layout (no text blocks found)")
 
             # Phase 2.5: Auto-detect source language if requested
             if source_language == "auto":
@@ -284,27 +330,91 @@ class PipelineService:
         file_type: FileType,
         layout_data: list,
         input_file_path: str,
+        ocr_unavailable_msg: Optional[str] = None,
     ) -> str:
         """
         Build the per-job structure.json from extracted layout data.
 
-        For scanned PDFs (and images), real OCR is not yet implemented, so we
-        return empty page blocks plus an explicit warning rather than the
-        placeholder/mock layout used by the rest of the pipeline.
+        Works the same way for digital and scanned input: blocks/lines come
+        directly from layout_data. For scanned input, `ocr_confidence` is
+        populated from the OCR engine's per-block confidence; for digital it
+        stays null. Page-level OCR errors and OCR unavailability are surfaced
+        in `warnings`.
         """
         detected_type = self._format_detected_type(file_type, job.detection_type)
         is_scanned = job.detection_type == DetectionType.SCANNED
         warnings: list = []
         pages_out: list = []
 
-        if is_scanned:
+        if ocr_unavailable_msg:
             warnings.append(
-                "OCR is not yet implemented. Scanned PDFs and images cannot "
-                "be extracted to structured text blocks at this time."
+                "OCR engine unavailable; scanned input could not be processed. "
+                f"Detail: {ocr_unavailable_msg}"
             )
-            # Use source page geometry where possible (PDF only — pure images
-            # don't have a well-defined point size here).
-            if file_type == FileType.PDF:
+        elif is_scanned and not self.ocr_service.is_available():
+            warnings.append(
+                "Tesseract OCR is not available on this system. "
+                "Install Tesseract OCR to enable scanned-PDF extraction."
+            )
+
+        total_blocks = 0
+        for page_data in layout_data:
+            page_idx = page_data.get("page", 0)
+            blocks_out = []
+            block_counter = 0
+
+            page_err = page_data.get("ocr_error")
+            if page_err:
+                warnings.append(f"Page {page_idx + 1}: OCR error: {page_err}")
+
+            for block in page_data.get("blocks", []):
+                if block.get("type") != "text":
+                    continue
+                block_counter += 1
+                text = " ".join(
+                    line.get("text", "").strip()
+                    for line in block.get("lines", [])
+                    if line.get("text", "").strip()
+                ).strip()
+                if not text:
+                    continue
+
+                try:
+                    lang_result = self.language_service.detect_language(text)
+                    detected_lang = lang_result.get("language", "unknown")
+                except Exception:
+                    detected_lang = "unknown"
+
+                # Only scanned input carries a meaningful confidence value.
+                ocr_conf = None
+                raw_conf = block.get("confidence")
+                if is_scanned and raw_conf is not None:
+                    try:
+                        ocr_conf = round(float(raw_conf), 4)
+                    except (TypeError, ValueError):
+                        ocr_conf = None
+
+                bbox = block.get("bbox") or []
+                blocks_out.append({
+                    "block_id": f"p{page_idx + 1}_b{block_counter}",
+                    "bbox": list(bbox),
+                    "source_text": text,
+                    "detected_language": detected_lang,
+                    "ocr_confidence": ocr_conf,
+                })
+                total_blocks += 1
+
+            pages_out.append({
+                "page_number": page_idx + 1,
+                "width": page_data.get("width"),
+                "height": page_data.get("height"),
+                "blocks": blocks_out,
+            })
+
+        # If scanned and OCR found nothing, still surface page geometry so
+        # the frontend can render an empty preview, and add a clear warning.
+        if is_scanned and total_blocks == 0:
+            if not pages_out and file_type == FileType.PDF:
                 try:
                     import fitz
                     doc = fitz.open(input_file_path)
@@ -319,45 +429,11 @@ class PipelineService:
                     doc.close()
                 except Exception as e:
                     warnings.append(f"Could not read source page dimensions: {e}")
-        else:
-            for page_data in layout_data:
-                page_idx = page_data.get("page", 0)
-                blocks_out = []
-                block_counter = 0
-
-                for block in page_data.get("blocks", []):
-                    if block.get("type") != "text":
-                        continue
-                    block_counter += 1
-                    text = " ".join(
-                        line.get("text", "").strip()
-                        for line in block.get("lines", [])
-                        if line.get("text", "").strip()
-                    ).strip()
-                    if not text:
-                        continue
-
-                    try:
-                        lang_result = self.language_service.detect_language(text)
-                        detected_lang = lang_result.get("language", "unknown")
-                    except Exception:
-                        detected_lang = "unknown"
-
-                    bbox = block.get("bbox") or []
-                    blocks_out.append({
-                        "block_id": f"p{page_idx + 1}_b{block_counter}",
-                        "bbox": list(bbox),
-                        "source_text": text,
-                        "detected_language": detected_lang,
-                        "ocr_confidence": None,
-                    })
-
-                pages_out.append({
-                    "page_number": page_idx + 1,
-                    "width": page_data.get("width"),
-                    "height": page_data.get("height"),
-                    "blocks": blocks_out,
-                })
+            if not ocr_unavailable_msg:
+                warnings.append(
+                    "OCR did not extract any text. The page may be blank, "
+                    "low-quality, or in an unsupported language."
+                )
 
         structure = {
             "job_id": job_id,
@@ -391,25 +467,6 @@ class PipelineService:
         """Path to the per-job structure.json."""
         return os.path.join(self.file_service.get_job_dir(job_id), "structure.json")
 
-    def _create_mock_layout_for_scanned(self, file_path: str) -> list:
-        """
-        Create mock layout for scanned documents
-        Placeholder until OCR is implemented
-        """
-        return [{
-            "page": 0,
-            "width": 612,
-            "height": 792,
-            "blocks": [{
-                "type": "text",
-                "bbox": [50, 50, 562, 742],
-                "lines": [{
-                    "text": "[Scanned document - OCR not yet implemented]",
-                    "bbox": [50, 50, 562, 100]
-                }]
-            }]
-        }]
-    
     def _create_output_pdf(
         self,
         layout_data: list,
