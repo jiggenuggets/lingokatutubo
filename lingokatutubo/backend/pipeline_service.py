@@ -746,6 +746,28 @@ class PipelineService:
             return self.file_service.get_output_path(job_id, "translated.pdf")
         return None
 
+    def get_active_job_ids(self) -> List[str]:
+        """Return job IDs that should not have their files cleaned up yet."""
+        return [
+            job_id
+            for job_id, job in self.jobs.items()
+            if job.status in {"queued", "processing"}
+        ]
+
+    def cleanup_job_files(self, job_id: str) -> bool:
+        """Clean up one inactive job's files with active-job protection."""
+        return self.file_service.cleanup_job(
+            job_id,
+            active_job_ids=self.get_active_job_ids(),
+        )
+
+    def cleanup_old_job_files(self, max_age_seconds: float) -> Dict[str, List[str]]:
+        """Clean up old inactive job directories with active-job protection."""
+        return self.file_service.cleanup_old_jobs(
+            max_age_seconds,
+            active_job_ids=self.get_active_job_ids(),
+        )
+
 
 # Global instance
 _pipeline_service = None

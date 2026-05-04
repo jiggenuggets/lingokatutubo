@@ -60,6 +60,28 @@ file_service = get_file_service()
 pipeline_service = get_pipeline_service()
 translation_dataset = get_translation_dataset()
 PREVIEW_IMAGE_NAME_RE = re.compile(r"^(?:original|translated)_page_\d+\.png$")
+DEFAULT_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
+
+def _job_retention_seconds() -> int:
+    raw_value = os.environ.get("JOB_RETENTION_SECONDS")
+    if not raw_value:
+        return DEFAULT_JOB_RETENTION_SECONDS
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return DEFAULT_JOB_RETENTION_SECONDS
+
+
+def _cleanup_old_job_files() -> None:
+    """Best-effort retention cleanup; never block a new translation."""
+    try:
+        cleanup_result = pipeline_service.cleanup_old_job_files(_job_retention_seconds())
+        removed = cleanup_result.get("removed", [])
+        if removed:
+            print(f"[Cleanup] Removed {len(removed)} old job directories")
+    except Exception as e:
+        print(f"[Cleanup] Skipped old job cleanup: {e}")
 
 
 @app.get("/health")
@@ -114,6 +136,8 @@ async def translate_document(
                 status="failed",
                 message=f"Unsupported file type: {file.filename}"
             )
+
+        _cleanup_old_job_files()
         
         # Save the file
         input_path = await file_service.save_upload(

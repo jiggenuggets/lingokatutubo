@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -22,6 +23,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from detection_service import get_detection_service
 from extraction_service import ExtractionService
+from file_service import FileService
 from models import DetectionType, FileType
 from pipeline_service import JobStatus, PipelineService
 from reconstruction_service import ReconstructionService
@@ -366,6 +368,107 @@ class StructureJsonTests(unittest.TestCase):
         self.assertEqual(blocks[0]["lines"][0]["bbox"], [10, 20, 100, 40])
         self.assertEqual(blocks[1]["metadata"]["ext"], "png")
         self.assertIn("layout warning saved", structure["warnings"])
+
+
+class JobCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmp_path = Path(self.tmp.name)
+        self.service = FileService(upload_dir=str(self.tmp_path / "uploads"))
+
+    @staticmethod
+    def make_job_dir(service: FileService, job_id: str, age_seconds: float, now: float) -> Path:
+        job_dir = Path(service.get_job_dir(job_id))
+        job_dir.mkdir(parents=True, exist_ok=True)
+        marker = job_dir / "marker.txt"
+        marker.write_text("job data", encoding="utf-8")
+
+        timestamp = now - age_seconds
+        os.utime(marker, (timestamp, timestamp))
+        os.utime(job_dir, (timestamp, timestamp))
+        return job_dir
+
+    def test_cleanup_old_jobs_removes_old_job_directories(self):
+        now = time.time()
+        old_dir = self.make_job_dir(self.service, "old-job", age_seconds=3600, now=now)
+        recent_dir = self.make_job_dir(self.service, "recent-job", age_seconds=10, now=now)
+
+        result = self.service.cleanup_old_jobs(max_age_seconds=60, now=now)
+
+        self.assertFalse(old_dir.exists())
+        self.assertTrue(recent_dir.exists())
+        self.assertIn("old-job", result["removed"])
+        self.assertIn("recent-job", result["skipped_recent"])
+
+    def test_cleanup_old_jobs_does_not_remove_active_or_recent_jobs(self):
+        now = time.time()
+        active_dir = self.make_job_dir(self.service, "active-job", age_seconds=3600, now=now)
+        recent_dir = self.make_job_dir(self.service, "recent-job", age_seconds=10, now=now)
+
+        result = self.service.cleanup_old_jobs(
+            max_age_seconds=60,
+            active_job_ids=["active-job"],
+            now=now,
+        )
+
+        self.assertTrue(active_dir.exists())
+        self.assertTrue(recent_dir.exists())
+        self.assertEqual(result["removed"], [])
+        self.assertIn("active-job", result["skipped_active"])
+        self.assertIn("recent-job", result["skipped_recent"])
+
+    def test_cleanup_job_removes_explicit_inactive_job(self):
+        now = time.time()
+        job_dir = self.make_job_dir(self.service, "completed-job", age_seconds=0, now=now)
+
+        removed = self.service.cleanup_job("completed-job")
+
+        self.assertTrue(removed)
+        self.assertFalse(job_dir.exists())
+
+    def test_pipeline_cleanup_wrapper_protects_processing_jobs(self):
+        now = time.time()
+        active_dir = self.make_job_dir(self.service, "processing-job", age_seconds=3600, now=now)
+        completed_dir = self.make_job_dir(self.service, "completed-job", age_seconds=3600, now=now)
+
+        pipeline = PipelineService.__new__(PipelineService)
+        pipeline.file_service = self.service
+        active_job = JobStatus("processing-job")
+        active_job.status = "processing"
+        completed_job = JobStatus("completed-job")
+        completed_job.status = "completed"
+        pipeline.jobs = {
+            active_job.job_id: active_job,
+            completed_job.job_id: completed_job,
+        }
+
+        self.assertFalse(pipeline.cleanup_job_files("processing-job"))
+        self.assertTrue(active_dir.exists())
+        self.assertTrue(pipeline.cleanup_job_files("completed-job"))
+        self.assertFalse(completed_dir.exists())
+
+    def test_cleanup_refuses_unsafe_job_paths(self):
+        outside_dir = self.tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "marker.txt").write_text("keep", encoding="utf-8")
+
+        unsafe_job_ids = [
+            "../outside",
+            "..\\outside",
+            "",
+            ".",
+            "..",
+            "C:\\Windows\\win.ini",
+        ]
+
+        for unsafe_job_id in unsafe_job_ids:
+            with self.subTest(job_id=unsafe_job_id):
+                with self.assertRaises(ValueError):
+                    self.service.cleanup_job(unsafe_job_id)
+
+        self.assertTrue(outside_dir.exists())
+        self.assertTrue((outside_dir / "marker.txt").exists())
 
 
 class PipelineLayoutRegressionTests(unittest.TestCase):
