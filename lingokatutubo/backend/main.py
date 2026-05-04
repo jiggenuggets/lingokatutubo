@@ -21,6 +21,7 @@ import fastapi.middleware.cors
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import json
+import re
 import uuid
 from typing import Optional
 
@@ -58,6 +59,7 @@ app.add_middleware(
 file_service = get_file_service()
 pipeline_service = get_pipeline_service()
 translation_dataset = get_translation_dataset()
+PREVIEW_IMAGE_NAME_RE = re.compile(r"^(?:original|translated)_page_\d+\.png$")
 
 
 @app.get("/health")
@@ -410,6 +412,12 @@ async def serve_preview_image(job_id: str, image_name: str):
     Returns:
         PNG image file
     """
+    if not PREVIEW_IMAGE_NAME_RE.fullmatch(image_name):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid preview image name"}
+        )
+
     job_dir = file_service.get_job_dir(job_id)
     preview_dir = os.path.join(job_dir, "preview")
     image_path = os.path.join(preview_dir, image_name)

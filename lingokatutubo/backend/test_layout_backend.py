@@ -625,19 +625,18 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
         job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
         self.assert_completed_outputs(service, job_id)
 
-        original_preview = service.jobs[job_id].metadata["preview_original"][0]
-        image_name = Path(original_preview).name
-        self.assertEqual(image_name, "original_page_0.png")
-        self.assertEqual(
+        preview_names = [
+            Path(service.jobs[job_id].metadata["preview_original"][0]).name,
             Path(service.jobs[job_id].metadata["preview_translated"][0]).name,
-            "translated_page_0.png",
-        )
+        ]
+        self.assertEqual(preview_names, ["original_page_0.png", "translated_page_0.png"])
 
-        response = self.preview_image_response(service, job_id, image_name)
+        for image_name in preview_names:
+            response = self.preview_image_response(service, job_id, image_name)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers.get("content-type"), "image/png")
-        self.assertGreater(len(response.content), 0)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("content-type"), "image/png")
+            self.assertGreater(len(response.content), 0)
 
     def test_preview_image_endpoint_returns_error_for_missing_preview(self):
         service = self.make_pipeline_service()
@@ -647,10 +646,33 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
         job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
         self.assert_completed_outputs(service, job_id)
 
-        response = self.preview_image_response(service, job_id, "missing_page_0.png")
+        response = self.preview_image_response(service, job_id, "original_page_999.png")
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"error": "Image not found"})
+
+    def test_preview_image_endpoint_rejects_path_traversal_names(self):
+        service = self.make_pipeline_service()
+        pdf_path = self.tmp_path / "preview-traversal.pdf"
+        self.write_text_pdf(pdf_path)
+
+        job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
+        self.assert_completed_outputs(service, job_id)
+
+        unsafe_image_names = [
+            "../secret.png",
+            "..%2Fsecret.png",
+            "subdir/secret.png",
+            "C:%5CWindows%5Cwin.ini",
+            "original_page_0.png/extra",
+        ]
+
+        for image_name in unsafe_image_names:
+            response = self.preview_image_response(service, job_id, image_name)
+
+            self.assertIn(response.status_code, {400, 404})
+            if response.status_code == 400:
+                self.assertEqual(response.json(), {"error": "Invalid preview image name"})
 
     def test_pipeline_blank_scanned_pdf_fails_honestly_with_structure(self):
         service = self.make_pipeline_service(ocr_service=BlankOCR())
