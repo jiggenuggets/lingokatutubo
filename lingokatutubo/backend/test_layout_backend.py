@@ -474,7 +474,9 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
         import main as main_module
 
         original_pipeline_service = main_module.pipeline_service
+        original_file_service = main_module.file_service
         main_module.pipeline_service = service
+        main_module.file_service = service.file_service
         try:
             client = TestClient(main_module.app)
             structure_response = client.get(f"/structure/{job_id}")
@@ -486,6 +488,21 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
             return structure_response.json()
         finally:
             main_module.pipeline_service = original_pipeline_service
+            main_module.file_service = original_file_service
+
+    def preview_image_response(self, service: PipelineService, job_id: str, image_name: str):
+        import main as main_module
+
+        original_pipeline_service = main_module.pipeline_service
+        original_file_service = main_module.file_service
+        main_module.pipeline_service = service
+        main_module.file_service = service.file_service
+        try:
+            client = TestClient(main_module.app)
+            return client.get(f"/preview-image/{job_id}/{image_name}")
+        finally:
+            main_module.pipeline_service = original_pipeline_service
+            main_module.file_service = original_file_service
 
     def assert_completed_outputs(self, service: PipelineService, job_id: str) -> None:
         output_path = service.get_job_output(job_id)
@@ -599,6 +616,41 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
         self.assertIn("text", self.block_types(structure))
         self.assert_output_page_size(service, job_id, expected_width, expected_height)
         self.assert_output_has_image(service, job_id)
+
+    def test_preview_image_endpoint_serves_existing_generated_preview(self):
+        service = self.make_pipeline_service()
+        pdf_path = self.tmp_path / "preview-existing.pdf"
+        self.write_text_pdf(pdf_path)
+
+        job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
+        self.assert_completed_outputs(service, job_id)
+
+        original_preview = service.jobs[job_id].metadata["preview_original"][0]
+        image_name = Path(original_preview).name
+        self.assertEqual(image_name, "original_page_0.png")
+        self.assertEqual(
+            Path(service.jobs[job_id].metadata["preview_translated"][0]).name,
+            "translated_page_0.png",
+        )
+
+        response = self.preview_image_response(service, job_id, image_name)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("content-type"), "image/png")
+        self.assertGreater(len(response.content), 0)
+
+    def test_preview_image_endpoint_returns_error_for_missing_preview(self):
+        service = self.make_pipeline_service()
+        pdf_path = self.tmp_path / "preview-missing.pdf"
+        self.write_text_pdf(pdf_path)
+
+        job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
+        self.assert_completed_outputs(service, job_id)
+
+        response = self.preview_image_response(service, job_id, "missing_page_0.png")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"error": "Image not found"})
 
     def test_pipeline_blank_scanned_pdf_fails_honestly_with_structure(self):
         service = self.make_pipeline_service(ocr_service=BlankOCR())

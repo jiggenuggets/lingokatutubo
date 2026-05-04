@@ -57,11 +57,13 @@ class DetectionService:
             DetectionType.SCANNED (images are assumed to be scanned documents)
         """
         try:
-            img = Image.open(image_path)
-            
-            # Convert to RGB if necessary
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+            with Image.open(image_path) as img:
+                # Convert to RGB if necessary. The converted image is not
+                # needed yet, but this keeps the existing validation behavior
+                # while ensuring PIL file handles are closed promptly.
+                if img.mode != 'RGB':
+                    converted = img.convert('RGB')
+                    converted.close()
             
             # For now, assume all images are scanned documents
             # In production, use more sophisticated heuristics:
