@@ -12,7 +12,7 @@ OCRUnavailableError instead of silent placeholder output.
 
 import io
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 class OCRUnavailableError(RuntimeError):
@@ -40,6 +40,7 @@ class OCRService:
         self.denoise_enabled = denoise
         self.detect_orientation_enabled = detect_orientation
         self._verified: Optional[bool] = None
+        self._installed_languages: Optional[List[str]] = None
         # OSD support is checked lazily and cached. None = unknown, False = OSD
         # data missing or unusable, True = working.
         self._osd_available: Optional[bool] = None
@@ -78,6 +79,167 @@ class OCRService:
             return True
         except OCRUnavailableError:
             return False
+
+    def get_installed_languages(self) -> List[str]:
+        """Return Tesseract language packs reported by pytesseract."""
+        self._ensure_available()
+        return list(self._get_installed_tesseract_languages())
+
+    def _get_installed_tesseract_languages(self) -> List[str]:
+        """Cached wrapper around pytesseract.get_languages()."""
+        if self._installed_languages is not None:
+            return self._installed_languages
+
+        try:
+            import pytesseract  # type: ignore
+            languages = pytesseract.get_languages(config="")
+        except Exception as e:
+            raise OCRUnavailableError(
+                f"Tesseract OCR language list is not available: {e}. "
+                "Install Tesseract language data files, or set TESSDATA_PREFIX."
+            )
+
+        self._installed_languages = [str(lang) for lang in languages]
+        return self._installed_languages
+
+    # ------------------------------------------------------------------
+    # OCR language resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_language_list(
+        languages: Optional[Union[str, Sequence[str]]]
+    ) -> List[str]:
+        if languages is None:
+            return []
+        if isinstance(languages, str):
+            values = [languages]
+        else:
+            values = [str(value) for value in languages]
+
+        parts: List[str] = []
+        for value in values:
+            normalized = value
+            for sep in ("+", ",", ";", "|", "/"):
+                normalized = normalized.replace(sep, ",")
+            parts.extend(
+                part.strip()
+                for part in normalized.split(",")
+                if part.strip()
+            )
+        return parts
+
+    @staticmethod
+    def _normalize_language_name(language: str) -> str:
+        return language.strip().lower().replace("_", "-")
+
+    @staticmethod
+    def _format_language_list(languages: Sequence[str]) -> str:
+        if not languages:
+            return "none"
+        return ", ".join(sorted(languages))
+
+    @classmethod
+    def _candidate_tesseract_codes(cls, language: str) -> List[str]:
+        aliases = {
+            "en": ["eng"],
+            "eng": ["eng"],
+            "english": ["eng"],
+            "fil": ["fil"],
+            "filipino": ["fil", "tgl"],
+            "pilipino": ["fil", "tgl"],
+            "tl": ["tgl"],
+            "tgl": ["tgl"],
+            "tagalog": ["tgl"],
+            "ceb": ["ceb"],
+            "cebuano": ["ceb"],
+        }
+        if language in aliases:
+            return aliases[language]
+        if len(language) == 3 and language.isalpha():
+            return [language]
+        return []
+
+    @staticmethod
+    def _is_bagobo_language(language: str) -> bool:
+        return language in {
+            "bagobo",
+            "bagobo-tagabawa",
+            "tagabawa",
+            "bagobo tagabawa",
+            "bagobo/tagabawa",
+        }
+
+    def resolve_tesseract_language(
+        self,
+        languages: Optional[Union[str, Sequence[str]]] = None,
+    ) -> Tuple[str, List[str]]:
+        """Resolve requested language names to a safe Tesseract lang string.
+
+        Missing packs never bubble into a Tesseract crash. The resolver keeps
+        installed requested packs, falls back to English when needed, and
+        returns warnings for structure.json.
+        """
+        self._ensure_available()
+        installed = set(self._get_installed_tesseract_languages())
+        installed_ocr = {lang for lang in installed if lang != "osd"}
+        requested = self._coerce_language_list(languages)
+        if not requested:
+            requested = self._coerce_language_list(self.lang) or ["eng"]
+
+        selected: List[str] = []
+        warnings: List[str] = []
+
+        def add_warning(message: str) -> None:
+            if message and message not in warnings:
+                warnings.append(message)
+
+        for raw_language in requested:
+            language = self._normalize_language_name(raw_language)
+            if language in {"auto", "detect", "unknown"}:
+                continue
+
+            if self._is_bagobo_language(language):
+                add_warning(
+                    "No Tesseract OCR language pack exists for Bagobo/Tagabawa; "
+                    "using English OCR fallback for now."
+                )
+                continue
+
+            candidates = self._candidate_tesseract_codes(language)
+            if not candidates:
+                add_warning(
+                    f"Requested OCR language '{raw_language}' is not mapped to "
+                    "a known Tesseract language pack; using English OCR fallback."
+                )
+                continue
+
+            installed_candidate = next(
+                (candidate for candidate in candidates if candidate in installed_ocr),
+                None,
+            )
+            if installed_candidate:
+                if installed_candidate not in selected:
+                    selected.append(installed_candidate)
+                continue
+
+            add_warning(
+                f"Requested OCR language '{raw_language}' requires Tesseract "
+                f"pack(s) {' or '.join(candidates)}, but installed OCR packs "
+                f"are {self._format_language_list(list(installed_ocr))}; "
+                "using English OCR fallback."
+            )
+
+        if not selected:
+            selected = ["eng"]
+
+        if "eng" not in installed_ocr:
+            add_warning(
+                "Tesseract English language pack 'eng' is not installed; "
+                "OCR may fail until eng.traineddata is installed."
+            )
+
+        return "+".join(selected), warnings
 
     # ------------------------------------------------------------------
     # Preprocessing + orientation
@@ -196,12 +358,21 @@ class OCRService:
                 line["bbox"] = flip(line.get("bbox"))
         return page_layout
 
-    def _ocr_image(self, img, page_idx: int, page_w_pt: float, page_h_pt: float, scale: float) -> Dict[str, Any]:
+    def _ocr_image(
+        self,
+        img,
+        page_idx: int,
+        page_w_pt: float,
+        page_h_pt: float,
+        scale: float,
+        lang: str,
+        language_warnings: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Preprocess, orient, OCR, and build per-page layout for one image."""
         import pytesseract
         from pytesseract import Output
 
-        warnings: List[str] = []
+        warnings: List[str] = list(language_warnings or [])
 
         try:
             img = self._preprocess(img)
@@ -215,17 +386,36 @@ class OCRService:
 
         try:
             data = pytesseract.image_to_data(
-                img, output_type=Output.DICT, lang=self.lang
+                img, output_type=Output.DICT, lang=lang
             )
         except Exception as e:
-            print(f"[OCR] page {page_idx + 1} failed: {e}")
-            return {
-                "page": page_idx,
-                "width": page_w_pt,
-                "height": page_h_pt,
-                "blocks": [],
-                "ocr_error": str(e),
-            }
+            if lang != "eng":
+                warnings.append(
+                    f"OCR with Tesseract language '{lang}' failed; "
+                    "retried with English fallback."
+                )
+                try:
+                    data = pytesseract.image_to_data(
+                        img, output_type=Output.DICT, lang="eng"
+                    )
+                except Exception as retry_e:
+                    print(f"[OCR] page {page_idx + 1} failed: {retry_e}")
+                    return {
+                        "page": page_idx,
+                        "width": page_w_pt,
+                        "height": page_h_pt,
+                        "blocks": [],
+                        "ocr_error": f"{e}; English fallback also failed: {retry_e}",
+                    }
+            else:
+                print(f"[OCR] page {page_idx + 1} failed: {e}")
+                return {
+                    "page": page_idx,
+                    "width": page_w_pt,
+                    "height": page_h_pt,
+                    "blocks": [],
+                    "ocr_error": str(e),
+                }
 
         page_layout = self._build_page_layout(
             page_idx, page_w_pt, page_h_pt, data, scale
@@ -240,7 +430,11 @@ class OCRService:
     # Public API
     # ------------------------------------------------------------------
 
-    def extract_pdf_text_and_layout(self, pdf_path: str) -> List[Dict[str, Any]]:
+    def extract_pdf_text_and_layout(
+        self,
+        pdf_path: str,
+        languages: Optional[Union[str, Sequence[str]]] = None,
+    ) -> List[Dict[str, Any]]:
         """OCR every page of a scanned PDF.
 
         Returns layout_data in the same shape as
@@ -248,6 +442,7 @@ class OCRService:
         on each block and line.
         """
         self._ensure_available()
+        lang, language_warnings = self.resolve_tesseract_language(languages)
 
         import fitz  # PyMuPDF
         from PIL import Image
@@ -267,16 +462,23 @@ class OCRService:
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
 
                 pages_data.append(self._ocr_image(
-                    img, page_idx, page_w_pt, page_h_pt, scale
+                    img, page_idx, page_w_pt, page_h_pt, scale,
+                    lang=lang,
+                    language_warnings=language_warnings if page_idx == 0 else None,
                 ))
         finally:
             doc.close()
 
         return pages_data
 
-    def extract_image_text_and_layout(self, image_path: str) -> List[Dict[str, Any]]:
+    def extract_image_text_and_layout(
+        self,
+        image_path: str,
+        languages: Optional[Union[str, Sequence[str]]] = None,
+    ) -> List[Dict[str, Any]]:
         """OCR a single image file (treated as a one-page document)."""
         self._ensure_available()
+        lang, language_warnings = self.resolve_tesseract_language(languages)
 
         from PIL import Image
 
@@ -290,7 +492,13 @@ class OCRService:
         page_h_pt = img.height * 72.0 / float(self.dpi)
         scale = 72.0 / float(self.dpi)
 
-        return [self._ocr_image(img, 0, page_w_pt, page_h_pt, scale)]
+        return [
+            self._ocr_image(
+                img, 0, page_w_pt, page_h_pt, scale,
+                lang=lang,
+                language_warnings=language_warnings,
+            )
+        ]
 
     # ------------------------------------------------------------------
     # Internals

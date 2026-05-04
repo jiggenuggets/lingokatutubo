@@ -73,7 +73,8 @@ async def health() -> dict:
 async def translate_document(
     file: fastapi.UploadFile = fastapi.File(...),
     source_language: str = fastapi.Form("auto"),
-    target_language: str = fastapi.Form("tagabawa")
+    target_language: str = fastapi.Form("tagabawa"),
+    ocr_languages: Optional[str] = fastapi.Form(None),
 ) -> TranslateResponse:
     """
     Upload a document and start translation
@@ -84,6 +85,7 @@ async def translate_document(
         file: The document file
         source_language: Source language (default: english)
         target_language: Target language (default: tagabawa)
+        ocr_languages: Optional comma/plus separated OCR language list for scans
     
     Returns:
         Job ID and initial status
@@ -118,7 +120,11 @@ async def translate_document(
             job_id
         )
         
-        print(f"[Translate] job_id={job_id} filename={file.filename} source={source_language} target={target_language}")
+        print(
+            f"[Translate] job_id={job_id} filename={file.filename} "
+            f"source={source_language} target={target_language} "
+            f"ocr_languages={ocr_languages}"
+        )
         
         # Start pipeline in background
         # Note: In production, use Celery/RQ for background tasks
@@ -129,7 +135,8 @@ async def translate_document(
                 input_file_path=input_path,
                 file_type=file_type,
                 source_language=source_language,
-                target_language=target_language
+                target_language=target_language,
+                ocr_languages=ocr_languages,
             )
         )
         
@@ -214,8 +221,9 @@ async def get_structure(job_id: str):
     blocks: [{block_id, bbox, source_text, detected_language, ocr_confidence}]}],
     warnings: []}.
 
-    For digital PDFs, ocr_confidence is null. For scanned PDFs/images, blocks
-    are empty and a warning is included since OCR is not yet implemented.
+    For digital PDFs, ocr_confidence is null. For scanned PDFs/images,
+    Tesseract OCR fills blocks when text is found and warnings explain OCR
+    fallback or failure cases.
     """
     structure_path = pipeline_service.get_structure_path(job_id)
     job_status = pipeline_service.get_job_status(job_id)
@@ -446,4 +454,3 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

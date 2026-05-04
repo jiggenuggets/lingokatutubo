@@ -5,7 +5,7 @@ Orchestrates the entire translation workflow
 
 import asyncio
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Sequence, Union
 from datetime import datetime
 import json
 
@@ -54,7 +54,8 @@ class PipelineService:
         input_file_path: str,
         file_type: FileType,
         source_language: str = "auto",
-        target_language: str = "tagabawa"
+        target_language: str = "tagabawa",
+        ocr_languages: Optional[Union[str, Sequence[str]]] = None,
     ) -> bool:
         """
         Main translation pipeline
@@ -65,6 +66,7 @@ class PipelineService:
             file_type: Type of file (PDF, DOCX, JPG, PNG)
             source_language: Source language
             target_language: Target language
+            ocr_languages: Optional OCR language names/codes for scanned input
         
         Returns:
             True if successful
@@ -98,6 +100,10 @@ class PipelineService:
             layout_data = []
             
             ocr_unavailable_msg: Optional[str] = None
+            requested_ocr_languages = self._requested_ocr_languages(
+                source_language=source_language,
+                ocr_languages=ocr_languages,
+            )
 
             if job.detection_type == DetectionType.DIGITAL:
                 if file_type == FileType.PDF:
@@ -109,10 +115,16 @@ class PipelineService:
                 try:
                     if file_type == FileType.PDF:
                         print(f"[Pipeline] SCANNED PDF - running Tesseract OCR")
-                        layout_data = self.ocr_service.extract_pdf_text_and_layout(input_file_path)
+                        layout_data = self.ocr_service.extract_pdf_text_and_layout(
+                            input_file_path,
+                            languages=requested_ocr_languages,
+                        )
                     elif file_type in (FileType.JPG, FileType.PNG):
                         print(f"[Pipeline] Image input - running Tesseract OCR")
-                        layout_data = self.ocr_service.extract_image_text_and_layout(input_file_path)
+                        layout_data = self.ocr_service.extract_image_text_and_layout(
+                            input_file_path,
+                            languages=requested_ocr_languages,
+                        )
                     else:
                         layout_data = []
                 except OCRUnavailableError as e:
@@ -323,6 +335,46 @@ class PipelineService:
     # Structure JSON (consumed by GET /structure/{job_id})
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _split_language_values(
+        languages: Optional[Union[str, Sequence[str]]]
+    ) -> List[str]:
+        if languages is None:
+            return []
+        if isinstance(languages, str):
+            values = [languages]
+        else:
+            values = [str(value) for value in languages]
+
+        parts: List[str] = []
+        for value in values:
+            normalized = value
+            for sep in ("+", ",", ";", "|", "/"):
+                normalized = normalized.replace(sep, ",")
+            parts.extend(
+                part.strip()
+                for part in normalized.split(",")
+                if part.strip()
+            )
+        return parts
+
+    def _requested_ocr_languages(
+        self,
+        source_language: str,
+        ocr_languages: Optional[Union[str, Sequence[str]]],
+    ) -> Optional[List[str]]:
+        explicit_ocr_languages = self._split_language_values(ocr_languages)
+        if explicit_ocr_languages:
+            return explicit_ocr_languages
+
+        source_languages = self._split_language_values(source_language)
+        source_languages = [
+            language
+            for language in source_languages
+            if language.lower() not in {"auto", "detect", "unknown"}
+        ]
+        return source_languages or None
+
     def _build_and_save_structure(
         self,
         job_id: str,
@@ -346,13 +398,17 @@ class PipelineService:
         warnings: list = []
         pages_out: list = []
 
+        def add_warning(message: str) -> None:
+            if message and message not in warnings:
+                warnings.append(message)
+
         if ocr_unavailable_msg:
-            warnings.append(
+            add_warning(
                 "OCR engine unavailable; scanned input could not be processed. "
                 f"Detail: {ocr_unavailable_msg}"
             )
         elif is_scanned and not self.ocr_service.is_available():
-            warnings.append(
+            add_warning(
                 "Tesseract OCR is not available on this system. "
                 "Install Tesseract OCR to enable scanned-PDF extraction."
             )
@@ -365,10 +421,10 @@ class PipelineService:
 
             page_err = page_data.get("ocr_error")
             if page_err:
-                warnings.append(f"Page {page_idx + 1}: OCR error: {page_err}")
+                add_warning(f"Page {page_idx + 1}: OCR error: {page_err}")
             page_warn = page_data.get("ocr_warning")
             if page_warn:
-                warnings.append(f"Page {page_idx + 1}: {page_warn}")
+                add_warning(f"Page {page_idx + 1}: {page_warn}")
 
             for block in page_data.get("blocks", []):
                 if block.get("type") != "text":
@@ -431,9 +487,9 @@ class PipelineService:
                         })
                     doc.close()
                 except Exception as e:
-                    warnings.append(f"Could not read source page dimensions: {e}")
+                    add_warning(f"Could not read source page dimensions: {e}")
             if not ocr_unavailable_msg:
-                warnings.append(
+                add_warning(
                     "OCR did not extract any text. The page may be blank, "
                     "low-quality, or in an unsupported language."
                 )
@@ -533,4 +589,3 @@ def get_pipeline_service() -> PipelineService:
     if _pipeline_service is None:
         _pipeline_service = PipelineService()
     return _pipeline_service
-
