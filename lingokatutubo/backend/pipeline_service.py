@@ -5,7 +5,7 @@ Orchestrates the entire translation workflow
 
 import asyncio
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Sequence, Union
 from datetime import datetime
 import json
 import sys
@@ -18,6 +18,7 @@ from extraction_service import get_extraction_service
 from reconstruction_service import get_reconstruction_service
 from translation_dataset import get_translation_dataset
 from language_detection_service import get_language_detection_service
+from ocr_stage import OCRUnavailableError, get_ocr_service
 
 
 class JobStatus:
@@ -45,6 +46,7 @@ class PipelineService:
         self.reconstruction_service = get_reconstruction_service()
         self.translation_dataset = get_translation_dataset()
         self.language_service = get_language_detection_service(self.translation_dataset)
+        self.ocr_service = get_ocr_service()
 
         self.jobs = {}  # job_id -> JobStatus
 
@@ -67,7 +69,8 @@ class PipelineService:
         input_file_path: str,
         file_type: FileType,
         source_language: str = "auto",
-        target_language: str = "tagabawa"
+        target_language: str = "tagabawa",
+        ocr_languages: Optional[Union[str, Sequence[str]]] = None,
     ) -> bool:
         """
         Main translation pipeline
@@ -78,6 +81,7 @@ class PipelineService:
             file_type: Type of file (PDF, DOCX, JPG, PNG)
             source_language: Source language
             target_language: Target language
+            ocr_languages: Optional OCR language names/codes for scanned input
         
         Returns:
             True if successful
@@ -110,42 +114,88 @@ class PipelineService:
             
             layout_data = []
             
+            ocr_unavailable_msg: Optional[str] = None
+            requested_ocr_languages = self._requested_ocr_languages(
+                source_language=source_language,
+                ocr_languages=ocr_languages,
+            )
+
             if job.detection_type == DetectionType.DIGITAL:
                 if file_type == FileType.PDF:
                     layout_data = self.extraction_service.extract_pdf_text_and_layout(input_file_path)
                 elif file_type == FileType.DOCX:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
             else:
-                print(f"[Pipeline] SCANNED document - running OCR")
-                ocr_result = self._run_ocr_for_scanned(input_file_path)
-                blocks = []
-                for block in ocr_result.get("results", []):
-                    blocks.append(
-                        {
-                            "type": "text",
-                            "bbox": block.get("bbox"),
-                            "lines": [
-                                {
-                                    "text": block.get("text", ""),
-                                    "translation": block.get("translation"),
-                                    "bbox": block.get("bbox"),
-                                }
-                            ],
-                        }
-                    )
-                layout_data = [
-                    {
-                        "page": 0,
-                        "width": 612,
-                        "height": 792,
-                        "blocks": blocks,
-                    }
-                ]
-            
-            if not layout_data:
-                raise Exception("Failed to extract layout")
-            
+                # Scanned input: route through Tesseract OCR. No mock fallback.
+                try:
+                    if file_type == FileType.PDF:
+                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR")
+                        layout_data = self.ocr_service.extract_pdf_text_and_layout(
+                            input_file_path,
+                            languages=requested_ocr_languages,
+                        )
+                    elif file_type in (FileType.JPG, FileType.PNG):
+                        print(f"[Pipeline] Image input - running Tesseract OCR")
+                        layout_data = self.ocr_service.extract_image_text_and_layout(
+                            input_file_path,
+                            languages=requested_ocr_languages,
+                        )
+                    else:
+                        layout_data = []
+                except OCRUnavailableError as e:
+                    ocr_unavailable_msg = str(e)
+                    print(f"[Pipeline] OCR unavailable: {e}")
+                    layout_data = []
+                except Exception as e:
+                    print(f"[Pipeline] OCR error: {e}")
+                    ocr_unavailable_msg = f"OCR error: {e}"
+                    layout_data = []
+
+            # layout_data may legitimately be empty for scanned input when OCR
+            # finds no text — defer the failure to after structure.json is saved
+            # so callers can inspect the warnings.
+            if layout_data is None:
+                layout_data = []
             job.metadata["layout_blocks"] = len(layout_data)
+
+            # Persist a structured view of the document for the /structure endpoint.
+            # Always runs (even on empty/failed OCR) so callers see the warnings.
+            try:
+                structure_path = self._build_and_save_structure(
+                    job_id=job_id,
+                    job=job,
+                    file_type=file_type,
+                    layout_data=layout_data,
+                    input_file_path=input_file_path,
+                    ocr_unavailable_msg=ocr_unavailable_msg,
+                )
+                job.metadata["structure_file"] = structure_path
+            except Exception as struct_err:
+                print(f"[Pipeline] Failed to build structure.json: {struct_err}")
+
+            # Now enforce: we need at least one extractable text block to
+            # continue. Fail loudly with an actionable message rather than
+            # silently producing placeholder output.
+            text_block_count = sum(
+                1
+                for page in layout_data
+                for block in page.get("blocks", [])
+                if block.get("type") == "text"
+                and any((line.get("text") or "").strip() for line in block.get("lines", []))
+            )
+            if text_block_count == 0:
+                if ocr_unavailable_msg:
+                    raise Exception(
+                        f"OCR engine unavailable: {ocr_unavailable_msg}. "
+                        "structure.json was written with a warning."
+                    )
+                if job.detection_type == DetectionType.SCANNED:
+                    raise Exception(
+                        "OCR produced no text from this scanned document. "
+                        "Page may be blank, low-quality, or in an unsupported "
+                        "language. structure.json contains warnings."
+                    )
+                raise Exception("Failed to extract layout (no text blocks found)")
 
             # Phase 2.5: Auto-detect source language if requested
             if source_language == "auto":
@@ -195,24 +245,34 @@ class PipelineService:
             job.progress = 75
             
             output_pdf_path = self.file_service.get_output_path(job_id, "translated.pdf")
+            layout_warnings: List[str] = []
             
             if file_type == FileType.PDF:
                 success = self.reconstruction_service.reconstruct_pdf(
                     input_file_path,
                     layout_data,
                     translations,
-                    output_pdf_path
+                    output_pdf_path,
+                    is_scanned=job.detection_type == DetectionType.SCANNED,
+                    layout_warnings=layout_warnings,
                 )
             else:
                 # For DOCX/images, create a simple PDF output
                 success = self._create_output_pdf(
                     layout_data,
                     translations,
-                    output_pdf_path
+                    output_pdf_path,
+                    input_file_path=input_file_path,
+                    file_type=file_type,
+                    layout_warnings=layout_warnings,
                 )
             
             if not success:
                 raise Exception("Failed to reconstruct PDF")
+
+            if layout_warnings:
+                job.metadata["layout_warnings"] = layout_warnings
+                self._append_structure_warnings(job_id, layout_warnings)
 
             if not os.path.exists(output_pdf_path):
                 raise Exception(f"Output PDF was not created at: {output_pdf_path}")
@@ -225,10 +285,10 @@ class PipelineService:
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
             original_previews = self.reconstruction_service.create_preview_images(
-                input_file_path, preview_dir, max_pages=2
+                input_file_path, preview_dir, max_pages=2, prefix="original"
             )
             translated_previews = self.reconstruction_service.create_preview_images(
-                output_pdf_path, preview_dir, max_pages=2
+                output_pdf_path, preview_dir, max_pages=2, prefix="translated"
             )
             
             job.metadata["preview_original"] = original_previews
@@ -303,38 +363,387 @@ class PipelineService:
         
         return translations
     
+    # ------------------------------------------------------------------
+    # Structure JSON (consumed by GET /structure/{job_id})
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _split_language_values(
+        languages: Optional[Union[str, Sequence[str]]]
+    ) -> List[str]:
+        if languages is None:
+            return []
+        if isinstance(languages, str):
+            values = [languages]
+        else:
+            values = [str(value) for value in languages]
+
+        parts: List[str] = []
+        for value in values:
+            normalized = value
+            for sep in ("+", ",", ";", "|", "/"):
+                normalized = normalized.replace(sep, ",")
+            parts.extend(
+                part.strip()
+                for part in normalized.split(",")
+                if part.strip()
+            )
+        return parts
+
+    def _requested_ocr_languages(
+        self,
+        source_language: str,
+        ocr_languages: Optional[Union[str, Sequence[str]]],
+    ) -> Optional[List[str]]:
+        explicit_ocr_languages = self._split_language_values(ocr_languages)
+        if explicit_ocr_languages:
+            return explicit_ocr_languages
+
+        source_languages = self._split_language_values(source_language)
+        source_languages = [
+            language
+            for language in source_languages
+            if language.lower() not in {"auto", "detect", "unknown"}
+        ]
+        return source_languages or None
+
+    def _build_and_save_structure(
+        self,
+        job_id: str,
+        job: "JobStatus",
+        file_type: FileType,
+        layout_data: list,
+        input_file_path: str,
+        ocr_unavailable_msg: Optional[str] = None,
+    ) -> str:
+        """
+        Build the per-job structure.json from extracted layout data.
+
+        Works the same way for digital and scanned input: blocks/lines come
+        directly from layout_data. For scanned input, `ocr_confidence` is
+        populated from the OCR engine's per-block confidence; for digital it
+        stays null. Page-level OCR errors and OCR unavailability are surfaced
+        in `warnings`.
+        """
+        detected_type = self._format_detected_type(file_type, job.detection_type)
+        is_scanned = job.detection_type == DetectionType.SCANNED
+        warnings: list = []
+        pages_out: list = []
+
+        def add_warning(message: str) -> None:
+            if message and message not in warnings:
+                warnings.append(message)
+
+        if ocr_unavailable_msg:
+            add_warning(
+                "OCR engine unavailable; scanned input could not be processed. "
+                f"Detail: {ocr_unavailable_msg}"
+            )
+        elif is_scanned and not self.ocr_service.is_available():
+            add_warning(
+                "Tesseract OCR is not available on this system. "
+                "Install Tesseract OCR to enable scanned-PDF extraction."
+            )
+
+        total_text_blocks = 0
+        for page_data in layout_data:
+            page_idx = page_data.get("page", 0)
+            blocks_out = []
+            block_counter = 0
+
+            page_err = page_data.get("ocr_error")
+            if page_err:
+                add_warning(f"Page {page_idx + 1}: OCR error: {page_err}")
+            page_warn = page_data.get("ocr_warning")
+            if page_warn:
+                add_warning(f"Page {page_idx + 1}: {page_warn}")
+
+            for block in page_data.get("blocks", []):
+                block_type = block.get("type", "unknown")
+                block_counter += 1
+
+                if block_type == "text":
+                    text = " ".join(
+                        line.get("text", "").strip()
+                        for line in block.get("lines", [])
+                        if line.get("text", "").strip()
+                    ).strip()
+                    if not text:
+                        continue
+
+                    try:
+                        lang_result = self.language_service.detect_language(text)
+                        detected_lang = lang_result.get("language", "unknown")
+                    except Exception:
+                        detected_lang = "unknown"
+
+                    # Only scanned input carries a meaningful confidence value.
+                    ocr_conf = None
+                    raw_conf = block.get("confidence")
+                    if is_scanned and raw_conf is not None:
+                        try:
+                            ocr_conf = round(float(raw_conf), 4)
+                        except (TypeError, ValueError):
+                            ocr_conf = None
+
+                    bbox = block.get("bbox") or []
+                    blocks_out.append({
+                        "block_id": f"p{page_idx + 1}_b{block_counter}",
+                        "block_type": "text",
+                        "type": "text",
+                        "bbox": self._json_safe_value(bbox),
+                        "source_text": text,
+                        "detected_language": detected_lang,
+                        "ocr_confidence": ocr_conf,
+                        "lines": self._structure_lines(block),
+                    })
+                    total_text_blocks += 1
+                    continue
+
+                bbox = block.get("bbox") or []
+                blocks_out.append({
+                    "block_id": f"p{page_idx + 1}_b{block_counter}",
+                    "block_type": block_type,
+                    "type": block_type,
+                    "bbox": self._json_safe_value(bbox),
+                    "source_text": None,
+                    "detected_language": None,
+                    "ocr_confidence": None,
+                    "metadata": self._block_metadata(block),
+                })
+
+            pages_out.append({
+                "page_number": page_idx + 1,
+                "width": page_data.get("width"),
+                "height": page_data.get("height"),
+                "rotation": page_data.get("rotation", 0),
+                "blocks": blocks_out,
+            })
+
+        # If scanned and OCR found nothing, still surface page geometry so
+        # the frontend can render an empty preview, and add a clear warning.
+        if is_scanned and total_text_blocks == 0:
+            if not pages_out and file_type == FileType.PDF:
+                try:
+                    import fitz
+                    doc = fitz.open(input_file_path)
+                    for i in range(doc.page_count):
+                        p = doc[i]
+                        pages_out.append({
+                            "page_number": i + 1,
+                            "width": p.rect.width,
+                            "height": p.rect.height,
+                            "blocks": [],
+                        })
+                    doc.close()
+                except Exception as e:
+                    add_warning(f"Could not read source page dimensions: {e}")
+            if not ocr_unavailable_msg:
+                add_warning(
+                    "OCR did not extract any text. The page may be blank, "
+                    "low-quality, or in an unsupported language."
+                )
+
+        structure = {
+            "job_id": job_id,
+            "status": job.status,
+            "detected_type": detected_type,
+            "pages": pages_out,
+            "warnings": warnings,
+        }
+
+        structure_path = self.get_structure_path(job_id)
+        os.makedirs(os.path.dirname(structure_path), exist_ok=True)
+        with open(structure_path, "w", encoding="utf-8") as f:
+            json.dump(structure, f, ensure_ascii=False, indent=2)
+        print(f"[Pipeline] structure.json saved: {structure_path}")
+        return structure_path
+
+    @staticmethod
+    def _format_detected_type(
+        file_type: FileType,
+        detection_type: Optional[DetectionType],
+    ) -> str:
+        if file_type == FileType.PDF:
+            return "digital_pdf" if detection_type == DetectionType.DIGITAL else "scanned_pdf"
+        if file_type == FileType.DOCX:
+            return "docx"
+        if file_type in (FileType.JPG, FileType.PNG):
+            return "scanned_image"
+        return str(file_type.value) if file_type else "unknown"
+
+    def get_structure_path(self, job_id: str) -> str:
+        """Path to the per-job structure.json."""
+        return os.path.join(self.file_service.get_job_dir(job_id), "structure.json")
+
+    @staticmethod
+    def _json_safe_value(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): PipelineService._json_safe_value(item)
+                for key, item in value.items()
+                if key not in {"image", "mask"}
+            }
+        if isinstance(value, (list, tuple)):
+            return [PipelineService._json_safe_value(item) for item in value]
+        return str(value)
+
+    def _block_metadata(self, block: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = {}
+        for key, value in block.items():
+            if key in {"type", "bbox", "lines", "image", "mask"}:
+                continue
+            metadata[key] = self._json_safe_value(value)
+        return metadata
+
+    def _structure_lines(self, block: Dict[str, Any]) -> List[Dict[str, Any]]:
+        lines_out: List[Dict[str, Any]] = []
+        for idx, line in enumerate(block.get("lines", []), start=1):
+            text = (line.get("text") or "").strip()
+            if not text:
+                continue
+            line_out = {
+                "line_id": idx,
+                "text": text,
+                "bbox": self._json_safe_value(line.get("bbox") or []),
+                "font": line.get("font", ""),
+                "size": line.get("size"),
+                "color": self._json_safe_value(line.get("color")),
+            }
+            if line.get("confidence") is not None:
+                line_out["ocr_confidence"] = line.get("confidence")
+            if line.get("spans"):
+                line_out["spans"] = self._json_safe_value(line.get("spans"))
+            lines_out.append(line_out)
+        return lines_out
+
+    def _append_structure_warnings(self, job_id: str, warnings: List[str]) -> None:
+        """Append reconstruction/layout warnings to structure.json."""
+        if not warnings:
+            return
+        structure_path = self.get_structure_path(job_id)
+        if not os.path.exists(structure_path):
+            return
+        try:
+            with open(structure_path, "r", encoding="utf-8") as f:
+                structure = json.load(f)
+
+            existing = structure.get("warnings", [])
+            if not isinstance(existing, list):
+                existing = []
+            for warning in warnings:
+                if warning not in existing:
+                    existing.append(warning)
+            structure["warnings"] = existing
+
+            with open(structure_path, "w", encoding="utf-8") as f:
+                json.dump(structure, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Pipeline] Failed to append layout warnings to structure.json: {e}")
+
     def _create_output_pdf(
         self,
         layout_data: list,
         translations: Dict[str, Dict[str, str]],
-        output_path: str
+        output_path: str,
+        input_file_path: Optional[str] = None,
+        file_type: Optional[FileType] = None,
+        layout_warnings: Optional[List[str]] = None,
     ) -> bool:
         """
-        Create a simple PDF from layout data with translated text
+        Create a simple PDF from layout data with translated text.
+
+        For image inputs, the original raster image is placed as the page
+        background before translated OCR text is overlaid.
         """
         try:
             import fitz
             doc = fitz.open()
-            page = doc.new_page()
-            
-            y_pos = 50
-            for page_index, page_data in enumerate(layout_data):
+            page_items = layout_data or [{
+                "page": 0,
+                "width": 612,
+                "height": 792,
+                "blocks": [],
+            }]
+
+            for page_idx, page_data in enumerate(page_items):
+                try:
+                    page_width = float(page_data.get("width") or 612)
+                    page_height = float(page_data.get("height") or 792)
+                except Exception:
+                    page_width = 612
+                    page_height = 792
+
+                page = doc.new_page(width=page_width, height=page_height)
+
+                if (
+                    page_idx == 0
+                    and input_file_path
+                    and file_type in (FileType.JPG, FileType.PNG)
+                    and os.path.exists(input_file_path)
+                ):
+                    try:
+                        page.insert_image(
+                            page.rect,
+                            filename=input_file_path,
+                            keep_proportion=False,
+                            overlay=False,
+                        )
+                    except Exception as e:
+                        layout_warnings = layout_warnings if layout_warnings is not None else []
+                        if f"Page {page_idx + 1}: failed to preserve source image background: {e}" not in layout_warnings:
+                            layout_warnings.append(
+                                f"Page {page_idx + 1}: failed to preserve source image background: {e}"
+                            )
+
                 blocks = page_data.get("blocks", [])
                 
-                for block_index, block in enumerate(blocks):
+                for block_idx, block in enumerate(blocks, start=1):
                     if block.get("type") != "text":
                         continue
                     
                     lines = block.get("lines", [])
                     
-                    for line in lines:
-                        original = line.get("text", "")
-                        block_id = f"{page_index}_{block_index}"
+                    for line_idx, line in enumerate(lines, start=1):
+                        original = (line.get("text") or "").strip()
+                        block_id = f"{page_idx}_{block_idx - 1}"
                         translated = translations.get(block_id, {}).get("translated", original)
                         
-                        if translated:
-                            page.insert_text((50, y_pos), translated, fontsize=11)
-                            y_pos += 20
+                        if not translated or translated.strip() == original:
+                            continue
+
+                        rect = self.reconstruction_service._rect_from_bbox(
+                            line.get("bbox"),
+                            page.rect,
+                            padding=0.75,
+                        )
+                        if rect is None:
+                            if layout_warnings is not None:
+                                layout_warnings.append(
+                                    f"Page {page_idx + 1}, block {block_idx}, line {line_idx}: "
+                                    "invalid text bbox; translated text was skipped."
+                                )
+                            continue
+
+                        page.draw_rect(
+                            rect,
+                            color=(1, 1, 1),
+                            fill=(1, 1, 1),
+                            width=0,
+                            overlay=True,
+                        )
+                        self.reconstruction_service._insert_text_in_rect(
+                            page,
+                            rect,
+                            translated,
+                            line,
+                            layout_warnings,
+                            page_idx + 1,
+                            block_idx,
+                            line_idx,
+                        )
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             doc.save(output_path)
@@ -392,6 +801,28 @@ class PipelineService:
             return self.file_service.get_output_path(job_id, "translated.pdf")
         return None
 
+    def get_active_job_ids(self) -> List[str]:
+        """Return job IDs that should not have their files cleaned up yet."""
+        return [
+            job_id
+            for job_id, job in self.jobs.items()
+            if job.status in {"queued", "processing"}
+        ]
+
+    def cleanup_job_files(self, job_id: str) -> bool:
+        """Clean up one inactive job's files with active-job protection."""
+        return self.file_service.cleanup_job(
+            job_id,
+            active_job_ids=self.get_active_job_ids(),
+        )
+
+    def cleanup_old_job_files(self, max_age_seconds: float) -> Dict[str, List[str]]:
+        """Clean up old inactive job directories with active-job protection."""
+        return self.file_service.cleanup_old_jobs(
+            max_age_seconds,
+            active_job_ids=self.get_active_job_ids(),
+        )
+
 
 # Global instance
 _pipeline_service = None
@@ -403,4 +834,3 @@ def get_pipeline_service() -> PipelineService:
     if _pipeline_service is None:
         _pipeline_service = PipelineService()
     return _pipeline_service
-

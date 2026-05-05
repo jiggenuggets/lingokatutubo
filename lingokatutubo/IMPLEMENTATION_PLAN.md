@@ -5,6 +5,26 @@
 **Goal:** Build a layout-aware document translation system for Bagobo-Tagabawa educational materials.  
 **Approach:** Build document processing first, then connect translation datasets later.
 
+> **This is a roadmap, not a status report.** Each phase below is annotated with the labels **Implemented**, **Partially Implemented**, or **Planned** to reflect what exists in code today (2026-05-04). For the live status summary see [README.md](../README.md). For the running system see [RUNNING_GUIDE.md](RUNNING_GUIDE.md).
+
+### Snapshot of plan status
+
+| Phase | Topic | Status |
+|-------|-------|--------|
+| 1 | Project Foundation (frontend + backend skeleton) | **Implemented** |
+| 2 | File Intake / Job Pipeline | **Implemented** (in-memory job store; no `job_store.py` module) |
+| 3 | PDF Type Detection | **Implemented** (text-layer probe; no pdfplumber) |
+| 4 | Digital PDF Extraction | **Partially Implemented** (text + bbox + font name; no color/alignment/lines/shapes) |
+| 5 | Scanned PDF OCR | **Planned** (placeholder only — no Tesseract/PaddleOCR call) |
+| 6 | Layout-Aware Reconstruction | **Partially Implemented** (white-box overlay + 11pt insert_text; no font/size adaptation, no shape preservation) |
+| 7 | Preview Generation | **Implemented** (first 2 pages; not consumed by frontend) |
+| 8 | Tables | **Planned** |
+| 9 | Translation Dataset Integration | **Implemented** (exact → fuzzy → word-by-word; no `[UNKNOWN]` markers, no confidence surfaced) |
+| 10 | Language Detection | **Implemented** (langdetect + Tagabawa dictionary) |
+| 11 | Frontend Build Order — upload UI | **Implemented** |
+| 11 | Frontend Build Order — progress modal | **Planned** (currently just an inline spinner) |
+| 11 | Frontend Build Order — side-by-side viewer | **Planned** (no `translation-viewer.tsx`) |
+
 ---
 
 ## 1. Build Order Summary
@@ -91,25 +111,27 @@ Detect whether the input PDF is digital or scanned.
 
 ---
 
-## 4. Phase 4 — Digital PDF Extraction
+## 4. Phase 4 — Digital PDF Extraction  *(Partially Implemented)*
+
+> **Reality check:** [extraction_service.py](backend/extraction_service.py) extracts page width/height, text blocks, line bboxes, and the **font name** of the first span per line. It does **not** currently capture font size, color, alignment, vector lines, or shapes. Image blocks are detected but no image bytes/coordinates are propagated to reconstruction. There is no `layout_models.py`.
 
 This is the first major working path.
 
 ### Modules
-- `extraction_service.py`
-- `layout_models.py`
+- `extraction_service.py`  *(exists)*
+- `layout_models.py`  *(Planned — typed data model for blocks)*
 
 ### Extract these from each page
-- page width / height
-- text blocks
-- bounding boxes
-- font size
-- font name
-- font color
-- alignment if possible
-- images
-- lines
-- rectangles / shapes
+- page width / height  *(Implemented)*
+- text blocks  *(Implemented)*
+- bounding boxes  *(Implemented)*
+- font size  *(Planned)*
+- font name  *(Implemented — first span only)*
+- font color  *(Planned)*
+- alignment if possible  *(Planned)*
+- images  *(Partial — detected, not preserved through reconstruction)*
+- lines  *(Planned)*
+- rectangles / shapes  *(Planned)*
 
 ### Recommended tools
 - pdfplumber
@@ -132,11 +154,13 @@ This is the first major working path.
 
 ---
 
-## 5. Phase 5 — Scanned PDF OCR Path
+## 5. Phase 5 — Scanned PDF OCR Path  *(Planned — Not Yet Implemented)*
+
+> **Reality check (2026-05-04):** This phase is **not implemented**. The SCANNED branch in `pipeline_service.py` calls `_create_mock_layout_for_scanned()` which returns the literal text `"[Scanned document - OCR not yet implemented]"`. The folder `backend/ocr_stage/` is empty. `pytesseract` is in `requirements.txt` but is not imported anywhere. There is no PaddleOCR. Until this phase is built, **uploading a scanned PDF still produces a "completed" job**, but the translated PDF will only contain the placeholder string.
 
 Only after digital extraction works.
 
-### Modules
+### Modules (to be created)
 - `ocr_service.py`
 - `image_preprocess.py`
 
@@ -160,21 +184,23 @@ OCR path should be treated as a lower-fidelity path than digital PDFs.
 
 ---
 
-## 6. Phase 6 — Layout-Aware Reconstruction
+## 6. Phase 6 — Layout-Aware Reconstruction  *(Partially Implemented)*
+
+> **Reality check:** [reconstruction_service.py](backend/reconstruction_service.py) opens the original PDF, paints a white rectangle over each text block bbox, and inserts translated text at the original line bbox using **a hardcoded 11pt font and PyMuPDF's default font** with `color=(0,0,0)`. There is **no copy of images, lines, or shapes**, **no font matching**, **no font-size adaptation**, and **no overflow handling**. The white overlay can erase decorative elements that overlap text bboxes. A bilingual side-by-side PDF (`bilingual.pdf`) is also produced.
 
 Do this before translation dataset integration.
 
 ### Module
-- `reconstruction_service.py`
+- `reconstruction_service.py`  *(exists)*
 
 ### Rebuild rules
-- Create output PDF page with same size
-- Copy images to same location
-- Copy lines/shapes to same location
-- Place translated or original text back into same text boxes
-- Preserve font size where possible
-- Shrink font only if needed
-- Wrap text carefully
+- Create output PDF page with same size  *(Implemented — opens original doc)*
+- Copy images to same location  *(Planned)*
+- Copy lines/shapes to same location  *(Planned)*
+- Place translated or original text back into same text boxes  *(Implemented — line-bbox level)*
+- Preserve font size where possible  *(Planned)*
+- Shrink font only if needed  *(Planned)*
+- Wrap text carefully  *(Planned)*
 
 ### Important limitation
 Do not claim exact perfect layout preservation yet.

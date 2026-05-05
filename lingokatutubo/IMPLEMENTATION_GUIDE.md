@@ -1,51 +1,62 @@
 # LingoKatutubo - Implementation Guide
 ## Layout-Preserving PDF Translation System
 
-**Version:** 1.0  
-**Date:** April 18, 2026  
-**Status:** Implementation Ready
+**Version:** 1.1  
+**Last reviewed:** 2026-05-04  
+**Status:** Reference / forward-looking. Most code samples below are **Planned** and not yet present in the repo. See [README.md](../README.md) for the live status table.
+
+> ⚠️ **How to read this file.** This is a target-state implementation reference. The Python and TypeScript snippets here are **design samples**, not the current code. Where the current code differs, follow the reality notes inline.
 
 ---
 
 ## Executive Summary
 
-This guide provides a complete implementation roadmap for the LingoKatutubo translation system based on your architecture document. The system currently has:
+✅ **Implemented**
+- Frontend upload UI ([frontend/app/translate/page.tsx](frontend/app/translate/page.tsx))
+- FastAPI backend with `/translate`, `/status`, `/preview`, `/download`, `/quick-translate`, `/health`, `/preview-image` ([backend/main.py](backend/main.py))
+- Translation dataset loader with exact + fuzzy (rapidfuzz) + word-by-word fallback ([backend/translation_dataset.py](backend/translation_dataset.py))
+- File upload + job directory + in-memory job tracking
+- Digital PDF text + bbox extraction (PyMuPDF), DOCX paragraph extraction
+- Document-level language detection (langdetect + Tagabawa dictionary)
+- Translated PDF reconstruction (white-box overlay + 11pt insert_text)
+- Bilingual PDF (side-by-side combined)
+- PNG previews for first 2 pages (endpoint exists, frontend does not consume it)
 
-✅ **Working Components:**
-- Frontend UI with upload interface
-- Basic backend API structure
-- Translation dataset loader
-- File upload handling
-- Job tracking system
-- Basic PDF extraction
+⚠️ **Partially Implemented**
+- PDF reconstruction (no font/size/color adaptation, no shape preservation, no overflow handling)
+- Translation cascade (no `[UNKNOWN]` marker, no confidence surfaced to frontend)
+- Image-block extraction (detected but not redrawn during reconstruction)
 
-❌ **Missing Components (Priority Implementation):**
-- **Side-by-Side Translation Preview** (Critical)
-- **Document Translation Progress Modal** (Critical)
-- **Layout-preserving PDF reconstruction** (Critical)
-- OCR for scanned documents
-- Language detection per block
-- Phrase matching with fuzzy logic
-- Dictionary fallback
-- Uncertainty flagging
+❌ **Planned — Not Yet Implemented (in priority order)**
+- **OCR for scanned documents** (Phase 3.1 below — sample code only; no `ocr_service.py` exists; `pytesseract` is unused; `backend/ocr_stage/` is empty)
+- **Structured per-block JSON endpoint** for the bilingual UI
+- **Side-by-Side Translation Preview** in the frontend (no `translation-viewer.tsx`)
+- **Document Translation Progress Modal** (no `translation-progress-modal.tsx`)
+- **Per-block language detection** (today's detection runs over the document, not per block)
+- **Uncertainty flagging service** (no `uncertainty_service.py`)
+- **Pretrained model translation** (ByT5-small for Bagobo, NLLB-200 distilled 600M for English/Cebuano/Tagalog) — no model is loaded or invoked at runtime
+- **Layout-preserving font/color/alignment, multi-line wrapping, image/shape redraw**
 
 ---
 
-## Current System Analysis
+## Current System Analysis (verified 2026-05-04)
 
 ### Backend Architecture (Current State)
 
 ```
 backend/
-├── main.py                      # ✅ FastAPI app with endpoints
-├── models.py                    # ✅ Data models
-├── file_service.py              # ✅ File storage management
-├── pipeline_service.py          # ⚠️  Basic pipeline (needs enhancement)
-├── extraction_service.py        # ⚠️  Basic extraction (needs layout preservation)
-├── reconstruction_service.py    # ⚠️  Basic reconstruction (needs work)
-├── detection_service.py         # ✅ File type detection
-├── translation_dataset.py       # ⚠️  Basic translation (needs fuzzy matching)
-└── translation_data.json        # ✅ Phrase dataset
+├── main.py                          # ✅ FastAPI app + CORS + endpoints
+├── models.py                        # ✅ Pydantic models (FileType, JobStatus, etc.)
+├── file_service.py                  # ✅ File storage + job dir
+├── pipeline_service.py              # ⚠️  Async pipeline; SCANNED branch is mocked
+├── extraction_service.py            # ⚠️  Text/bbox/font-name only; no color/alignment/shapes
+├── reconstruction_service.py        # ⚠️  White-box + 11pt insert_text; no shape preservation
+├── detection_service.py             # ✅ Digital vs scanned (text-layer probe)
+├── translation_dataset.py           # ✅ Exact + rapidfuzz fuzzy + word-by-word
+├── language_detection_service.py    # ✅ langdetect + Tagabawa dictionary
+├── translation_data.json            # ✅ Phrase dataset
+├── ocr_stage/                       # ❌ EMPTY — reserved for OCR (Planned)
+└── requirements.txt                 # ⚠️  pytesseract listed but never imported
 ```
 
 ### Frontend Architecture (Current State)
@@ -53,10 +64,18 @@ backend/
 ```
 frontend/
 ├── app/
-│   ├── translate/page.tsx      # ⚠️  Upload UI (needs preview component)
+│   ├── page.tsx                # ✅ Home
+│   ├── translate/page.tsx      # ⚠️  Upload + status polling + download (no preview)
 │   └── about/page.tsx          # ✅ About page
-└── components/
-    └── navigation.tsx          # ✅ Navigation
+├── components/
+│   ├── navigation.tsx          # ✅ Navigation
+│   ├── theme-provider.tsx      # ✅
+│   └── ui/                     # shadcn primitives — most are unused
+└── hooks/use-upload.ts         # ✅ POST /translate
+
+# ❌ Missing (Planned):
+#   components/translation-viewer.tsx
+#   components/translation-progress-modal.tsx
 ```
 
 ---
@@ -704,11 +723,13 @@ export function TranslationProgressModal({ jobId, onComplete }: ProgressModalPro
 
 ---
 
-### Phase 3: Advanced Features (Week 3-4)
+### Phase 3: Advanced Features (Week 3-4)  *(All sections below: Planned — Not Yet Implemented)*
 
-#### 3.1 OCR for Scanned Documents
+#### 3.1 OCR for Scanned Documents *(Planned)*
 
-**File:** `backend/ocr_service.py` (new file)
+> **Reality:** No OCR code is wired in. The pipeline's SCANNED branch ([backend/pipeline_service.py:262-279](backend/pipeline_service.py)) returns a placeholder block. The snippet below is **a design sample** showing one possible Tesseract integration. The model strategy now favours PaddleOCR over Tesseract — see the standalone model strategy audit; this section will be revisited when OCR work begins.
+
+**File:** `backend/ocr_service.py` (new file — does not exist yet)
 
 ```python
 import pytesseract
@@ -810,9 +831,11 @@ class OCRService:
         return sum(confidences) / len(confidences) if confidences else 0.0
 ```
 
-#### 3.2 Language Detection Per Block
+#### 3.2 Language Detection Per Block *(Planned)*
 
-**File:** `backend/language_detection_service.py` (new file)
+> **Reality:** [backend/language_detection_service.py](backend/language_detection_service.py) **does exist** and supports document-level detection (langdetect + Tagabawa dictionary). What is **not yet implemented** is *per-block* detection wired into the pipeline output. Today the pipeline detects only the document's primary language. The snippet below is the per-block extension that has not been built.
+
+**File:** `backend/language_detection_service.py` (per-block API to be added)
 
 ```python
 from langdetect import detect, detect_langs
@@ -876,9 +899,11 @@ class LanguageDetectionService:
             return False
 ```
 
-#### 3.3 Uncertainty Flagging System
+#### 3.3 Uncertainty Flagging System *(Planned)*
 
-**File:** `backend/uncertainty_service.py` (new file)
+> **Reality:** No `uncertainty_service.py` exists. The current translation cascade ([backend/translation_dataset.py](backend/translation_dataset.py)) returns either a translation or the original text — it does **not** emit a `[UNKNOWN]` marker, a confidence score, or a method tag. Adding this is part of the work blocking the bilingual UI.
+
+**File:** `backend/uncertainty_service.py` (new file — does not exist yet)
 
 ```python
 from typing import Dict, List
@@ -962,9 +987,11 @@ class UncertaintyService:
 
 ---
 
-## Updated Pipeline Service Integration
+## Updated Pipeline Service Integration *(Planned target shape)*
 
-**File:** `backend/pipeline_service.py` (updated)
+> **Reality:** This is the **target** pipeline shape. The current [backend/pipeline_service.py](backend/pipeline_service.py) follows a similar 6-phase flow (detection → extraction → language detection → translation → reconstruction → preview → bilingual PDF) but does **not** call `self.ocr_service`, `self.uncertainty_service`, or per-block language detection — those services do not exist yet.
+
+**File:** `backend/pipeline_service.py` (updated — design target)
 
 ```python
 async def process_translation(
@@ -1094,24 +1121,41 @@ async def process_translation(
 
 ---
 
-## Dependencies to Add
+## Dependencies — Current vs Target
 
-**File:** `backend/pyproject.toml` or `requirements.txt`
+**Current `backend/requirements.txt`:**
 
-```toml
-[tool.poetry.dependencies]
-python = "^3.9"
-fastapi = "^0.109.0"
-uvicorn = "^0.27.0"
-python-multipart = "^0.0.9"
-pymupdf = "^1.23.0"  # PyMuPDF for PDF processing
-python-docx = "^1.1.0"
-Pillow = "^10.2.0"
-pytesseract = "^0.3.10"  # OCR
-reportlab = "^4.0.9"  # PDF generation
-fuzzywuzzy = "^0.18.0"  # Fuzzy string matching
-python-Levenshtein = "^0.24.0"  # Fast fuzzy matching
-langdetect = "^1.0.9"  # Language detection
+```text
+fastapi[standard]>=0.128.1
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pymupdf>=1.24.8
+python-docx>=0.8.11
+pillow>=10.4.0
+numpy>=1.26.0
+pydantic>=2.0.0
+aiofiles>=23.2.1
+reportlab>=4.2.0
+pytesseract>=0.3.13       # ⚠ declared but not imported anywhere
+rapidfuzz>=3.9.0          # used by translation_dataset.py
+langdetect>=1.0.9
+openpyxl>=3.1.0
+```
+
+> Note: the project chose **rapidfuzz**, not `fuzzywuzzy`/`python-Levenshtein`. Earlier drafts of this guide listed `fuzzywuzzy`; ignore that — `rapidfuzz` is what is actually wired in.
+
+**Additional packages required by Planned phases (not yet added):**
+
+```text
+# OCR — pick one when Phase 3.1 is built
+paddleocr>=2.7   # preferred per the model strategy audit
+# (Tesseract path: keep pytesseract + system-installed Tesseract)
+
+# Pretrained translation models — Planned (do NOT install until OCR + JSON contract are stable)
+transformers>=4.40
+sentencepiece
+accelerate
+# torch is platform-specific; install per pytorch.org instructions
 ```
 
 ---

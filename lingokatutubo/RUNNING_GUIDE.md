@@ -1,12 +1,12 @@
 # LingoKatutubo – Local Running Guide (Windows)
 
+> **Status:** the backend runs end-to-end for digital PDFs and DOCX. Scanned-PDF OCR is **Planned (not yet implemented)** — see the README and `pipeline_service.py:_create_mock_layout_for_scanned`. Uploading a scanned PDF will currently produce a placeholder output, not a real translation.
+
 ## Prerequisites
 
 - **Python 3.11** — https://www.python.org/downloads/ (check "Add to PATH")
 - **Node.js 18+** — https://nodejs.org/
-- **Tesseract OCR** *(optional, for scanned-image documents)* —
-  https://github.com/UB-Mannheim/tesseract/wiki
-  After installing, add `C:\Program Files\Tesseract-OCR` to your system PATH.
+- **Tesseract OCR** — *Not required.* `pytesseract` is listed in `requirements.txt` but **no code imports or calls it today**. Installing Tesseract will not enable scanned-PDF OCR until the OCR branch is wired (see Planned items in `README.md`). The earlier instruction to install Tesseract has been left in `requirements.txt` so the OCR branch can be turned on later without an extra install step.
 
 ---
 
@@ -59,15 +59,18 @@ Frontend URL: **http://localhost:3000**
 
 ## Backend API Routes
 
-| Method | URL | Description |
-|--------|-----|-------------|
-| GET | /health | Health check |
-| POST | /translate | Upload document for translation |
-| GET | /status/{job_id} | Poll translation progress + detected language |
-| GET | /preview/{job_id} | Get preview images |
-| GET | /preview-image/{job_id}/{name} | Serve a preview image |
-| GET | /download/{job_id} | Download translated PDF |
-| POST | /quick-translate | Translate a single phrase |
+| Method | URL | Status | Description |
+|--------|-----|--------|-------------|
+| GET | /health | Implemented | Health check (returns `translation_dataset_loaded`) |
+| POST | /translate | Implemented | Upload document, returns `job_id` + `status` |
+| GET | /status/{job_id} | Implemented | Poll job status, progress, detected language, confidence |
+| GET | /jobs/{job_id} | Implemented | Alias for `/status/{job_id}` |
+| GET | /preview/{job_id} | Implemented (unused by frontend) | Lists preview image filenames; the current frontend does **not** consume this |
+| GET | /preview-image/{job_id}/{name} | Implemented | Serves a preview PNG |
+| GET | /download/{job_id} | Implemented | Returns `translated.pdf` (verifies the file exists first) |
+| POST | /quick-translate | Implemented | Translate a single phrase via the dataset cascade |
+
+> No structured per-block JSON endpoint exists yet (Planned). The bilingual display work needs one — see the README "Next Development Priorities".
 
 ---
 
@@ -119,8 +122,7 @@ Make sure both terminals are running simultaneously.
 The backend (port 8000) must be active before uploading a document.
 
 ### pytesseract errors
-Only needed for scanned/image documents.
-Install Tesseract OCR and add it to PATH, then restart the terminal.
+*Currently not applicable.* `pytesseract` is declared in `requirements.txt` but no module imports it. If you see a Tesseract error today, the cause is unrelated — check that the package even installed. When OCR is wired (Planned), this section will need to be revisited.
 
 ### Dataset shows no translation
 The phrase dataset rows need to be added to `backend/translation_data.json`
@@ -130,23 +132,30 @@ returned as-is.
 
 ---
 
-## Architecture
+## Architecture (current code, not aspirational)
 
 ```
 lingokatutubo/
-├── frontend/                    ← Next.js 15 app (React 19, Tailwind v4)
+├── frontend/                          ← Next.js 15 (React 19, Tailwind v4)
 │   ├── app/
-│   │   ├── page.tsx             ← Home page
-│   │   ├── translate/page.tsx   ← Translator page (4 languages + auto-detect)
-│   │   └── about/page.tsx       ← About page
-│   ├── components/navigation.tsx
-│   ├── hooks/use-upload.ts      ← Calls backend /translate
-│   └── lib/utils.ts             ← Tailwind cn() helper
-└── backend/                     ← FastAPI (Python 3.11)
-    ├── main.py                  ← API routes + CORS
-    ├── pipeline_service.py      ← Translation orchestration + auto-detect
-    ├── language_detection_service.py ← langdetect + Tagabawa dictionary
-    ├── translation_dataset.py   ← Cross-lingual phrase lookup
-    ├── translation_data.json    ← Phrase dataset (add "rows" array here)
+│   │   ├── page.tsx                   ← Home page
+│   │   ├── translate/page.tsx         ← Upload + status polling + download
+│   │   └── about/page.tsx
+│   ├── components/navigation.tsx      ← (no side-by-side viewer yet — Planned)
+│   ├── hooks/use-upload.ts            ← POST /translate
+│   └── lib/utils.ts
+└── backend/                           ← FastAPI (Python 3.11)
+    ├── main.py                        ← API routes + CORS
+    ├── pipeline_service.py            ← Async pipeline orchestration
+    ├── detection_service.py           ← Digital vs scanned PDF detection
+    ├── extraction_service.py          ← PyMuPDF text/bbox extraction
+    ├── reconstruction_service.py      ← Translated PDF + bilingual PDF + previews
+    ├── translation_dataset.py         ← exact → fuzzy → word-by-word cascade
+    ├── language_detection_service.py  ← langdetect + Tagabawa dictionary
+    ├── file_service.py                ← Upload + job dir management
+    ├── translation_data.json          ← Phrase dataset
+    ├── ocr_stage/                     ← (empty; reserved for OCR work — Planned)
     └── requirements.txt
 ```
+
+For full architecture (including aspirational components), see [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md). Components labelled **Planned** in that file do not exist in code yet.

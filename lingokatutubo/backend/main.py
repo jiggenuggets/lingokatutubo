@@ -20,6 +20,8 @@ import fastapi
 import fastapi.middleware.cors
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+import json
+import re
 import uuid
 from typing import Optional
 
@@ -57,6 +59,29 @@ app.add_middleware(
 file_service = get_file_service()
 pipeline_service = get_pipeline_service()
 translation_dataset = get_translation_dataset()
+PREVIEW_IMAGE_NAME_RE = re.compile(r"^(?:original|translated)_page_\d+\.png$")
+DEFAULT_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
+
+def _job_retention_seconds() -> int:
+    raw_value = os.environ.get("JOB_RETENTION_SECONDS")
+    if not raw_value:
+        return DEFAULT_JOB_RETENTION_SECONDS
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return DEFAULT_JOB_RETENTION_SECONDS
+
+
+def _cleanup_old_job_files() -> None:
+    """Best-effort retention cleanup; never block a new translation."""
+    try:
+        cleanup_result = pipeline_service.cleanup_old_job_files(_job_retention_seconds())
+        removed = cleanup_result.get("removed", [])
+        if removed:
+            print(f"[Cleanup] Removed {len(removed)} old job directories")
+    except Exception as e:
+        print(f"[Cleanup] Skipped old job cleanup: {e}")
 
 
 @app.get("/health")
@@ -72,7 +97,8 @@ async def health() -> dict:
 async def translate_document(
     file: fastapi.UploadFile = fastapi.File(...),
     source_language: str = fastapi.Form("auto"),
-    target_language: str = fastapi.Form("tagabawa")
+    target_language: str = fastapi.Form("tagabawa"),
+    ocr_languages: Optional[str] = fastapi.Form(None),
 ) -> TranslateResponse:
     """
     Upload a document and start translation
@@ -83,6 +109,7 @@ async def translate_document(
         file: The document file
         source_language: Source language (default: english)
         target_language: Target language (default: tagabawa)
+        ocr_languages: Optional comma/plus separated OCR language list for scans
     
     Returns:
         Job ID and initial status
@@ -109,6 +136,8 @@ async def translate_document(
                 status="failed",
                 message=f"Unsupported file type: {file.filename}"
             )
+
+        _cleanup_old_job_files()
         
         # Save the file
         input_path = await file_service.save_upload(
@@ -117,7 +146,11 @@ async def translate_document(
             job_id
         )
         
-        print(f"[Translate] job_id={job_id} filename={file.filename} source={source_language} target={target_language}")
+        print(
+            f"[Translate] job_id={job_id} filename={file.filename} "
+            f"source={source_language} target={target_language} "
+            f"ocr_languages={ocr_languages}"
+        )
         
         # Start pipeline in background
         # Note: In production, use Celery/RQ for background tasks
@@ -128,7 +161,8 @@ async def translate_document(
                 input_file_path=input_path,
                 file_type=file_type,
                 source_language=source_language,
-                target_language=target_language
+                target_language=target_language,
+                ocr_languages=ocr_languages,
             )
         )
         
@@ -202,6 +236,52 @@ async def get_status(job_id: str) -> dict:
         "is_mixed_language": meta.get("is_mixed_language", False),
         "metadata": meta,
     }
+
+
+@app.get("/structure/{job_id}")
+async def get_structure(job_id: str):
+    """
+    Return the structured document JSON for a job.
+
+    Shape: {job_id, status, detected_type, pages: [{page_number, width, height,
+    rotation, blocks: [{block_id, block_type, bbox, source_text, lines,
+    metadata, detected_language, ocr_confidence}]}], warnings: []}.
+
+    For digital PDFs, ocr_confidence is null. For scanned PDFs/images,
+    Tesseract OCR fills blocks when text is found and warnings explain OCR
+    fallback or failure cases.
+    """
+    structure_path = pipeline_service.get_structure_path(job_id)
+    job_status = pipeline_service.get_job_status(job_id)
+
+    if not os.path.exists(structure_path):
+        if not job_status:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Job not found", "detail": f"No job with id {job_id}"},
+            )
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "Structure not yet available",
+                "detail": f"Job status is {job_status.status}; extraction has not produced structure.json yet",
+            },
+        )
+
+    try:
+        with open(structure_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to read structure.json", "detail": str(e)},
+        )
+
+    # Reflect the live job state rather than the snapshot taken at extraction time.
+    if job_status:
+        data["status"] = job_status.status
+
+    return data
 
 
 @app.get("/preview/{job_id}")
@@ -361,11 +441,17 @@ async def serve_preview_image(job_id: str, image_name: str):
     
     Args:
         job_id: Job ID
-        image_name: Image filename (preview_page_0.png, etc)
+        image_name: Image filename (original_page_0.png, translated_page_0.png, etc)
     
     Returns:
         PNG image file
     """
+    if not PREVIEW_IMAGE_NAME_RE.fullmatch(image_name):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid preview image name"}
+        )
+
     job_dir = file_service.get_job_dir(job_id)
     preview_dir = os.path.join(job_dir, "preview")
     image_path = os.path.join(preview_dir, image_name)
@@ -398,6 +484,7 @@ async def root():
         "endpoints": {
             "POST /translate": "Upload document for translation",
             "GET /status/{job_id}": "Get translation job status",
+            "GET /structure/{job_id}": "Get structured page/block JSON for a job",
             "GET /preview/{job_id}": "Get preview images",
             "GET /download/{job_id}": "Download translated document",
             "POST /quick-translate": "Translate a single phrase",
@@ -409,4 +496,3 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
