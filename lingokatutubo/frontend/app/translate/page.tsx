@@ -25,6 +25,7 @@ const TARGET_LANGUAGES = [
 
 export default function TranslatePage() {
   const [previewData, setPreviewData] = useState<any>(null);
+  const [documentStructure, setDocumentStructure] = useState<any>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState('auto');
@@ -32,6 +33,8 @@ export default function TranslatePage() {
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [structureStatus, setStructureStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback' | 'error'>('idle');
+  const [structureMessage, setStructureMessage] = useState<string | null>(null);
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [detectionConfidence, setDetectionConfidence] = useState<number | null>(null);
   const [isDetectingLanguage, setIsDetectingLanguage] = useState(false);
@@ -134,6 +137,9 @@ export default function TranslatePage() {
     if (!selectedFile) return;
     clearPolling();
     setPreviewData(null);
+    setDocumentStructure(null);
+    setStructureStatus('idle');
+    setStructureMessage(null);
     setErrorMessage(null);
     setDetectedLanguage(null);
     setDetectionConfidence(null);
@@ -214,14 +220,34 @@ export default function TranslatePage() {
           clearPolling();
           setIsDetectingLanguage(false);
           setIsJobComplete(true);
+          setStructureStatus('loading');
+          setStructureMessage(null);
           try {
-            const previewResponse = await fetch(`${API_BASE}/preview/${jobId}`);
-            if (previewResponse.ok) {
-              const preview = await previewResponse.json();
-              setPreviewData(preview);
+            const [previewResult, structureResult] = await Promise.allSettled([
+              fetch(`${API_BASE}/preview/${jobId}`),
+              fetch(`${API_BASE}/structure/${jobId}`),
+            ]);
+
+            if (previewResult.status === 'fulfilled' && previewResult.value.ok) {
+              setPreviewData(await previewResult.value.json());
+            }
+
+            if (structureResult.status === 'fulfilled') {
+              const structureResponse = structureResult.value;
+              if (structureResponse.ok) {
+                setDocumentStructure(await structureResponse.json());
+                setStructureStatus('ready');
+              } else {
+                setStructureStatus('fallback');
+                setStructureMessage(`/structure/${jobId} returned HTTP ${structureResponse.status}. Showing preview fallback.`);
+              }
+            } else {
+              setStructureStatus('error');
+              setStructureMessage('Structured bilingual data could not be loaded. Showing preview fallback when available.');
             }
           } catch {
-            // Keep completion flow intact even if preview is unavailable.
+            setStructureStatus('error');
+            setStructureMessage('Preview data could not be loaded, but the translated file may still be available for download.');
           }
           return;
         }
@@ -301,6 +327,9 @@ export default function TranslatePage() {
   const resetTranslation = () => {
     clearPolling();
     setPreviewData(null);
+    setDocumentStructure(null);
+    setStructureStatus('idle');
+    setStructureMessage(null);
     setSelectedFile(null);
     setUploadId(null);
     setUploadStatus('idle');
@@ -334,7 +363,13 @@ export default function TranslatePage() {
     resolvePreviewUrl(previewData?.left_page_preview) ??
     getPreviewImageUrl(previewData?.job_id, previewData?.original_pages?.[0]);
 
-  const previewBlocks = previewData?.bilingual_first_page?.blocks ?? [];
+  const structureBlocks =
+    documentStructure?.pages?.[0]?.blocks?.filter((block: any) => block.type === 'text') ?? [];
+  const bilingualBlocks =
+    structureBlocks.length > 0
+      ? structureBlocks
+      : previewData?.bilingual_first_page?.blocks ?? [];
+  const canShowBilingualOutput = isJobComplete || previewData || documentStructure;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background via-white to-background">
@@ -598,37 +633,76 @@ export default function TranslatePage() {
           </div>
         </div>
 
-        {previewData && (
-          <div className="mt-10 grid gap-5 md:grid-cols-2">
+        {canShowBilingualOutput && (
+          <div className="mt-10 space-y-5">
             <div className="rounded-xl border border-primary/20 bg-white p-4">
-              <h3 className="mb-3 text-lg font-bold text-primary">Original Page</h3>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-primary">Bilingual Output</h3>
+                  <p className="text-sm text-foreground/60">
+                    Page 1 blocks are shown in reading order.
+                  </p>
+                </div>
+                {structureStatus === 'loading' && (
+                  <p className="text-sm text-blue-600 flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />
+                    Loading structured blocks...
+                  </p>
+                )}
+              </div>
+
+              {(structureStatus === 'fallback' || structureStatus === 'error') && structureMessage && (
+                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  {structureMessage}
+                </div>
+              )}
+
+              {bilingualBlocks.length > 0 ? (
+                <div className="mt-4 space-y-3">
+                  {bilingualBlocks.map((block: any, index: number) => {
+                    const sourceText = block.source_text ?? block.original_text ?? '-';
+                    const translatedText = block.translated_text ?? 'UNKNOWN_FOR_REVIEW';
+                    const needsReview = !block.translated_text || block.translated_text === 'UNKNOWN_FOR_REVIEW';
+
+                    return (
+                      <div key={block.block_id ?? index} className="rounded-lg border border-foreground/10">
+                        <div className="grid gap-0 md:grid-cols-2">
+                          <div className="border-b border-foreground/10 p-4 md:border-b-0 md:border-r">
+                            <p className="mb-2 text-xs font-bold uppercase text-foreground/45">Original</p>
+                            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/85">{sourceText}</p>
+                          </div>
+                          <div className="p-4">
+                            <p className="mb-2 text-xs font-bold uppercase text-foreground/45">Translation</p>
+                            <p className={`whitespace-pre-wrap text-sm leading-relaxed ${needsReview ? 'font-semibold text-red-600' : 'text-foreground/85'}`}>
+                              {translatedText}
+                            </p>
+                          </div>
+                        </div>
+                        {(block.translation_method || block.cascade_stage || block.translation_confidence != null) && (
+                          <div className="border-t border-foreground/10 px-4 py-2 text-xs text-foreground/55">
+                            {block.translation_method ?? block.cascade_stage ?? 'unknown'}
+                            {block.translation_confidence != null && ` - ${(block.translation_confidence * 100).toFixed(0)}%`}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-lg border border-foreground/10 p-4 text-sm text-foreground/70">
+                  {structureStatus === 'loading'
+                    ? 'Waiting for structured bilingual blocks...'
+                    : 'No bilingual text blocks are available for this job yet.'}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-primary/20 bg-white p-4">
+              <h3 className="mb-3 text-lg font-bold text-primary">Original Page Preview</h3>
               {firstOriginalPreview ? (
                 <img src={firstOriginalPreview} alt="Original page preview" className="w-full rounded-lg border" />
               ) : (
                 <p className="text-sm text-foreground/70">No original preview available.</p>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-secondary/20 bg-white p-4">
-              <h3 className="mb-3 text-lg font-bold text-secondary">Translated Blocks</h3>
-              {previewBlocks.length > 0 ? (
-                <div className="space-y-3">
-                  {previewBlocks.map((block: any, index: number) => (
-                    <div key={index} className="rounded-lg border border-foreground/10 p-3">
-                      <p className="text-sm"><strong>Original:</strong> {block.original_text ?? '-'}</p>
-                      <p className="mt-1 text-sm">
-                        <strong>Translation:</strong>{' '}
-                        <span className={block.translated_text === 'UNKNOWN_FOR_REVIEW' ? 'text-red-600 font-semibold' : ''}>
-                          {block.translated_text ?? 'UNKNOWN_FOR_REVIEW'}
-                        </span>
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-foreground/70">
-                  No bilingual text blocks available for this job yet.
-                </p>
               )}
             </div>
           </div>

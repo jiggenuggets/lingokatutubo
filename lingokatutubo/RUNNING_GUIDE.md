@@ -1,12 +1,12 @@
 # LingoKatutubo – Local Running Guide (Windows)
 
-> **Status:** the backend runs end-to-end for digital PDFs and DOCX. Scanned-PDF OCR is **Planned (not yet implemented)** — see the README and `pipeline_service.py:_create_mock_layout_for_scanned`. Uploading a scanned PDF will currently produce a placeholder output, not a real translation.
+> **Status:** the backend runs end-to-end for digital PDFs and DOCX. Scanned-PDF/image OCR is **partially implemented** through Tesseract/pytesseract in `backend/ocr_stage/ocr_service.py`. If Tesseract or a needed language pack is unavailable, scanned jobs fail with warnings in `structure.json` instead of silently producing placeholder text.
 
 ## Prerequisites
 
 - **Python 3.11** — https://www.python.org/downloads/ (check "Add to PATH")
 - **Node.js 18+** — https://nodejs.org/
-- **Tesseract OCR** — *Not required.* `pytesseract` is listed in `requirements.txt` but **no code imports or calls it today**. Installing Tesseract will not enable scanned-PDF OCR until the OCR branch is wired (see Planned items in `README.md`). The earlier instruction to install Tesseract has been left in `requirements.txt` so the OCR branch can be turned on later without an extra install step.
+- **Tesseract OCR** — required for scanned PDF/image OCR. `pytesseract` is installed from `requirements.txt`, but the system Tesseract binary and language packs must also be installed. Set `TESSERACT_CMD` if Tesseract is not on PATH.
 
 ---
 
@@ -65,12 +65,13 @@ Frontend URL: **http://localhost:3000**
 | POST | /translate | Implemented | Upload document, returns `job_id` + `status` |
 | GET | /status/{job_id} | Implemented | Poll job status, progress, detected language, confidence |
 | GET | /jobs/{job_id} | Implemented | Alias for `/status/{job_id}` |
-| GET | /preview/{job_id} | Implemented (unused by frontend) | Lists preview image filenames; the current frontend does **not** consume this |
+| GET | /structure/{job_id} | Implemented | Returns structured page/block JSON for the job |
+| GET | /preview/{job_id} | Implemented (partly consumed by frontend) | Lists preview image filenames and first-page bilingual blocks |
 | GET | /preview-image/{job_id}/{name} | Implemented | Serves a preview PNG |
 | GET | /download/{job_id} | Implemented | Returns `translated.pdf` (verifies the file exists first) |
 | POST | /quick-translate | Implemented | Translate a single phrase via the dataset cascade |
 
-> No structured per-block JSON endpoint exists yet (Planned). The bilingual display work needs one — see the README "Next Development Priorities".
+> The frontend currently consumes `/preview/{job_id}` for the original page preview and `/structure/{job_id}` for first-page translated block data. Full multi-page viewing is still planned.
 
 ---
 
@@ -121,14 +122,21 @@ cmd /c npx next dev -p 3000 ```
 Make sure both terminals are running simultaneously.
 The backend (port 8000) must be active before uploading a document.
 
-### pytesseract errors
-*Currently not applicable.* `pytesseract` is declared in `requirements.txt` but no module imports it. If you see a Tesseract error today, the cause is unrelated — check that the package even installed. When OCR is wired (Planned), this section will need to be revisited.
+### pytesseract / Tesseract errors
+Scanned PDF/image OCR depends on both the `pytesseract` Python package and a working Tesseract binary. If OCR fails, check that Tesseract is installed, `TESSERACT_CMD` points to `tesseract.exe` when needed, and required language packs are present.
 
 ### Dataset shows no translation
-The phrase dataset rows need to be added to `backend/translation_data.json`
-under a `"rows"` key (see ARCHITECTURE_DIAGRAM.md for the column schema).
-The system will still start and the UI will work; untranslatable words are
-returned as-is.
+The bundled `backend/translation_data.json` uses plain keys such as
+`english`, `tagabawa`, `filipino`, and `cebuano`; the loader normalizes
+those into the internal `*_source` keys. If translations still return the
+original text, check that the phrase exists in the selected source language
+and target language. Out-of-vocabulary words are returned as-is.
+
+### Dataset/model expectations
+The active dataset has 1015 phrase rows and is used as phrasebook /
+translation memory. It is not enough for high-accuracy neural translation.
+ByT5-small and NLLB-200 distilled 600M are planned future pretrained-model
+paths only; the running backend does not load or invoke either model.
 
 ---
 
@@ -154,7 +162,7 @@ lingokatutubo/
     ├── language_detection_service.py  ← langdetect + Tagabawa dictionary
     ├── file_service.py                ← Upload + job dir management
     ├── translation_data.json          ← Phrase dataset
-    ├── ocr_stage/                     ← (empty; reserved for OCR work — Planned)
+    ├── ocr_stage/                     ← Tesseract-backed OCR service
     └── requirements.txt
 ```
 

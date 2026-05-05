@@ -239,6 +239,7 @@ class PipelineService:
                 layout_data,
                 translations,
             )
+            self._attach_translations_to_structure(job_id, translations)
             
             # Phase 4: Reconstruct document
             print(f"[Pipeline] Phase 4: Reconstructing document")
@@ -330,7 +331,7 @@ class PipelineService:
         Translate all text in layout data
         
         Returns:
-            Dict mapping block_id -> {"original", "translated"}
+            Dict mapping line/block/source keys to translation records.
         """
         translations = {}
         
@@ -343,23 +344,46 @@ class PipelineService:
                 
                 lines = block.get("lines", [])
                 
-                for line in lines:
+                for line_index, line in enumerate(lines):
                     original = line.get("text", "").strip()
                     if not original:
                         continue
                     
-                    # Translate using dataset
-                    translated = self.translation_dataset.translate_phrase(
-                        original,
-                        source_lang=source_lang,
-                        target_lang=target_lang
-                    )
+                    if hasattr(self.translation_dataset, "translate_phrase_with_metadata"):
+                        translation_meta = self.translation_dataset.translate_phrase_with_metadata(
+                            original,
+                            source_lang=source_lang,
+                            target_lang=target_lang
+                        )
+                    else:
+                        translated = self.translation_dataset.translate_phrase(
+                            original,
+                            source_lang=source_lang,
+                            target_lang=target_lang
+                        )
+                        translation_meta = {
+                            "translated": translated,
+                            "method": "unknown",
+                            "cascade_stage": "unknown",
+                            "confidence": None,
+                        }
 
                     block_id = f"{page_index}_{block_index}"
-                    translations[block_id] = {
+                    line_id = f"{page_index}_{block_index}_{line_index}"
+                    record = {
                         "original": original,
-                        "translated": translated,
+                        "translated": translation_meta.get("translated", original),
+                        "method": translation_meta.get("method", "unknown"),
+                        "cascade_stage": translation_meta.get("cascade_stage", translation_meta.get("method", "unknown")),
+                        "confidence": translation_meta.get("confidence"),
+                        "source_language": source_lang,
+                        "target_language": target_lang,
                     }
+                    translations[line_id] = record
+                    translations[original] = record
+                    translations[original.strip()] = record
+                    # Legacy block-level key for older reconstruction callers.
+                    translations[block_id] = record
         
         return translations
     
@@ -493,8 +517,13 @@ class PipelineService:
                         "type": "text",
                         "bbox": self._json_safe_value(bbox),
                         "source_text": text,
+                        "translated_text": None,
+                        "translation_method": None,
+                        "cascade_stage": None,
+                        "translation_confidence": None,
                         "detected_language": detected_lang,
                         "ocr_confidence": ocr_conf,
+                        "metadata": {"layout_block_index": block_counter - 1},
                         "lines": self._structure_lines(block),
                     })
                     total_text_blocks += 1
@@ -507,6 +536,10 @@ class PipelineService:
                     "type": block_type,
                     "bbox": self._json_safe_value(bbox),
                     "source_text": None,
+                    "translated_text": None,
+                    "translation_method": None,
+                    "cascade_stage": None,
+                    "translation_confidence": None,
                     "detected_language": None,
                     "ocr_confidence": None,
                     "metadata": self._block_metadata(block),
@@ -559,6 +592,101 @@ class PipelineService:
         print(f"[Pipeline] structure.json saved: {structure_path}")
         return structure_path
 
+    def _attach_translations_to_structure(
+        self,
+        job_id: str,
+        translations: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Attach translated text and cascade metadata to structure.json."""
+        structure_path = self.get_structure_path(job_id)
+        if not os.path.exists(structure_path):
+            return
+
+        try:
+            with open(structure_path, "r", encoding="utf-8") as f:
+                structure = json.load(f)
+
+            for page_idx, page in enumerate(structure.get("pages", [])):
+                for block in page.get("blocks", []):
+                    if block.get("type") != "text":
+                        continue
+                    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+                    block_idx = metadata.get("layout_block_index")
+                    if block_idx is None:
+                        block_idx = max(0, int(str(block.get("block_id", "b1")).rsplit("b", 1)[-1]) - 1)
+
+                    line_translations: List[str] = []
+                    line_methods: List[str] = []
+                    line_confidences: List[float] = []
+
+                    for line_idx, line in enumerate(block.get("lines", [])):
+                        source_text = (line.get("text") or "").strip()
+                        record = self._translation_record_for_line(
+                            translations,
+                            page_idx,
+                            int(block_idx),
+                            line_idx,
+                            source_text,
+                        )
+                        if not record:
+                            line["translated_text"] = None
+                            line["translation_method"] = None
+                            line["cascade_stage"] = None
+                            line["translation_confidence"] = None
+                            continue
+
+                        translated = record.get("translated")
+                        method = record.get("method")
+                        confidence = record.get("confidence")
+                        line["translated_text"] = translated
+                        line["translation_method"] = method
+                        line["cascade_stage"] = record.get("cascade_stage", method)
+                        line["translation_confidence"] = confidence
+
+                        if translated:
+                            line_translations.append(str(translated))
+                        if method:
+                            line_methods.append(str(method))
+                        if isinstance(confidence, (int, float)):
+                            line_confidences.append(float(confidence))
+
+                    block["translated_text"] = " ".join(line_translations).strip() or None
+                    block["translation_method"] = (
+                        line_methods[0]
+                        if line_methods and all(method == line_methods[0] for method in line_methods)
+                        else ("mixed" if line_methods else None)
+                    )
+                    block["cascade_stage"] = block["translation_method"]
+                    block["translation_confidence"] = (
+                        round(sum(line_confidences) / len(line_confidences), 4)
+                        if line_confidences
+                        else None
+                    )
+
+            with open(structure_path, "w", encoding="utf-8") as f:
+                json.dump(structure, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Pipeline] Failed to attach translations to structure.json: {e}")
+
+    @staticmethod
+    def _translation_record_for_line(
+        translations: Dict[str, Dict[str, Any]],
+        page_idx: int,
+        block_idx: int,
+        line_idx: int,
+        source_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        candidate_keys = [
+            f"{page_idx}_{block_idx}_{line_idx}",
+            source_text,
+            source_text.strip(),
+            f"{page_idx}_{block_idx}",
+        ]
+        for key in candidate_keys:
+            if key and key in translations:
+                return translations[key]
+        return None
+
     @staticmethod
     def _format_detected_type(
         file_type: FileType,
@@ -607,6 +735,11 @@ class PipelineService:
             line_out = {
                 "line_id": idx,
                 "text": text,
+                "source_text": text,
+                "translated_text": None,
+                "translation_method": None,
+                "cascade_stage": None,
+                "translation_confidence": None,
                 "bbox": self._json_safe_value(line.get("bbox") or []),
                 "font": line.get("font", ""),
                 "size": line.get("size"),
@@ -708,8 +841,14 @@ class PipelineService:
                     
                     for line_idx, line in enumerate(lines, start=1):
                         original = (line.get("text") or "").strip()
+                        line_key = f"{page_idx}_{block_idx - 1}_{line_idx - 1}"
                         block_id = f"{page_idx}_{block_idx - 1}"
-                        translated = translations.get(block_id, {}).get("translated", original)
+                        translated = (
+                            translations.get(line_key, {}).get("translated")
+                            or translations.get(block_id, {}).get("translated")
+                            or translations.get(original, {}).get("translated")
+                            or original
+                        )
                         
                         if not translated or translated.strip() == original:
                             continue

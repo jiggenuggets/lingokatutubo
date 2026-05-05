@@ -1,7 +1,10 @@
 """
-Translation dataset loader for LingoKatutubo phrasebook.
+Translation dataset loader for LingoKatutubo phrasebook / translation memory.
 Supports cross-lingual lookup between:
   English, Filipino, Cebuano, and Bagobo-Tagabawa.
+
+This dataset is intentionally used as a phrasebook first. It is not large
+enough to claim high-accuracy neural translation by itself.
 
 Loads from (in priority order):
   1. translation_data.json  (utf-8-sig to handle BOM)
@@ -92,12 +95,22 @@ class TranslationDataset:
                                      if not isinstance(v, list) or k in
                                      ("languages", "columns", "cleaning_rules_applied")}
                     for key in ("rows", "entries", "data", "phrases"):
-                        if isinstance(raw.get(key), list) and raw[key] and isinstance(raw[key][0], dict):
-                            if any(f"{l}_source" in raw[key][0] for l in SUPPORTED_LANGS):
-                                self.data = raw[key]
-                                break
+                        candidate_rows = raw.get(key)
+                        if not (
+                            isinstance(candidate_rows, list)
+                            and candidate_rows
+                            and isinstance(candidate_rows[0], dict)
+                        ):
+                            continue
+                        if any(
+                            _normalize_column(str(column_name))
+                            for column_name in candidate_rows[0].keys()
+                        ):
+                            self.data = candidate_rows
+                            break
 
                 if self.data:
+                    self.data = self._normalize_rows(self.data)
                     json_loaded = True
 
             except Exception as exc:
@@ -116,6 +129,7 @@ class TranslationDataset:
                 elif ext in (".xlsx", ".xls"):
                     self.data = self._load_excel(candidate_path)
                 if self.data:
+                    self.data = self._normalize_rows(self.data)
                     break
 
         # --- Common outcome ---
@@ -208,6 +222,39 @@ class TranslationDataset:
         return rows
 
     # ------------------------------------------------------------------
+    # Row normalization
+    # ------------------------------------------------------------------
+
+    def _normalize_rows(self, rows: List[Dict]) -> List[Dict]:
+        """Ensure every supported language is available as {lang}_source.
+
+        The bundled JSON uses plain language keys such as `english` and
+        `tagabawa`, while the lookup indices use canonical keys such as
+        `english_source` and `tagabawa_source`. CSV/Excel loading already
+        produces canonical keys, but normalizing all loaded rows keeps the
+        JSON and CSV paths equivalent.
+        """
+        normalized_rows: List[Dict] = []
+        for raw_row in rows:
+            if not isinstance(raw_row, dict):
+                continue
+
+            row = dict(raw_row)
+            for header, value in raw_row.items():
+                canonical_key = _normalize_column(str(header))
+                if not canonical_key:
+                    continue
+                current_value = str(row.get(canonical_key, "") or "").strip()
+                if current_value:
+                    continue
+                row[canonical_key] = str(value or "").strip()
+
+            if any(str(row.get(f"{lang}_source", "") or "").strip() for lang in SUPPORTED_LANGS):
+                normalized_rows.append(row)
+
+        return normalized_rows
+
+    # ------------------------------------------------------------------
     # Excel loader
     # ------------------------------------------------------------------
 
@@ -289,17 +336,40 @@ class TranslationDataset:
         Translate text using: exact match -> fuzzy match -> word-by-word.
         Returns original text if no translation is found.
         """
+        return self.translate_phrase_with_metadata(
+            text,
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )["translated"]
+
+    def translate_phrase_with_metadata(
+        self,
+        text: str,
+        source_lang: str = "english",
+        target_lang: str = "tagabawa",
+    ) -> Dict:
+        """
+        Translate text and return frontend/API metadata.
+
+        Returns:
+            {
+              translated,
+              method,
+              cascade_stage,
+              confidence
+            }
+        """
+        original = text.strip()
         if not self.is_loaded or not text.strip():
-            return text
+            return _translation_result(text, "untranslated", 0.0)
 
         if source_lang == target_lang:
-            return text
+            return _translation_result(text, "identity", 1.0)
 
         # Normalize language aliases
         source_lang = _normalize_lang(source_lang)
         target_lang = _normalize_lang(target_lang)
 
-        original = text.strip()
         norm = original.lower()
         target_key = f"{target_lang}_source"
         src_index = self._phrase_indices.get(source_lang, {})
@@ -307,15 +377,27 @@ class TranslationDataset:
         # 1. Exact match
         result = _first_result(src_index.get(norm, []), target_key)
         if result:
-            return _preserve_case(original, result)
+            return _translation_result(
+                _preserve_case(original, result),
+                "exact_phrase",
+                1.0,
+            )
 
         # 2. Fuzzy match (rapidfuzz)
-        result = self._fuzzy_match(norm, src_index, target_key)
+        fuzzy = self._fuzzy_match(norm, src_index, target_key)
+        result = fuzzy["translated"] if fuzzy else None
         if result:
-            return _preserve_case(original, result)
+            return _translation_result(
+                _preserve_case(original, result),
+                "fuzzy_phrase",
+                fuzzy["score"] / 100.0,
+            )
 
         # 3. Word-by-word fallback
-        return self._translate_words(original, source_lang, target_lang)
+        word_result = self._translate_words(original, source_lang, target_lang)
+        if word_result != original:
+            return _translation_result(word_result, "word_by_word", 0.55)
+        return _translation_result(original, "untranslated", 0.0)
 
     def _fuzzy_match(
         self,
@@ -323,7 +405,7 @@ class TranslationDataset:
         src_index: Dict[str, List[Dict]],
         target_key: str,
         threshold: int = 82,
-    ) -> Optional[str]:
+    ) -> Optional[Dict]:
         if not src_index:
             return None
         try:
@@ -332,7 +414,9 @@ class TranslationDataset:
                 query, list(src_index.keys()), scorer=fuzz.ratio
             )
             if match and match[1] >= threshold:
-                return _first_result(src_index[match[0]], target_key)
+                translated = _first_result(src_index[match[0]], target_key)
+                if translated:
+                    return {"translated": translated, "score": float(match[1])}
         except ImportError:
             pass
         return None
@@ -419,6 +503,15 @@ def _first_result(rows: List[Dict], key: str) -> Optional[str]:
         if val:
             return val
     return None
+
+
+def _translation_result(translated: str, method: str, confidence: float) -> Dict:
+    return {
+        "translated": translated,
+        "method": method,
+        "cascade_stage": method,
+        "confidence": round(max(0.0, min(1.0, float(confidence))), 4),
+    }
 
 
 def _preserve_case(original: str, translated: str) -> str:

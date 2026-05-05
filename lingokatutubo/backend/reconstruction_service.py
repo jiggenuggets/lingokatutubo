@@ -470,7 +470,7 @@ class ReconstructionService:
                     
                     for line_idx, line in enumerate(lines, start=1):
                         original_text = line.get("text", "")
-                        lookup_key = f"{page_num}_{block_idx - 1}"
+                        lookup_key = f"{page_num}_{block_idx - 1}_{line_idx - 1}"
                         translated_text = ReconstructionService._translated_text_for_line(
                             translations,
                             lookup_key,

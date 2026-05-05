@@ -2,17 +2,17 @@
 
 > ⚠️ **This diagram is the target architecture.** Several boxes below describe components that are **Planned**, not yet implemented. Read the legend before trusting any box.
 
-## Implementation Legend (verified 2026-05-04)
+## Implementation Legend (verified 2026-05-05)
 
 | Component in diagram | Status |
 |---|---|
 | Frontend Upload UI | **Implemented** |
 | Frontend Progress Modal (multi-step) | **Planned** — current UI is just an inline spinner |
-| Frontend Side-by-Side Viewer | **Planned** — no `translation-viewer.tsx` exists |
-| Backend `POST /translate`, `GET /status`, `GET /preview`, `GET /download`, `GET /preview-image` | **Implemented** |
+| Frontend Side-by-Side Viewer | **Partially Implemented** - current translate page shows original page preview plus first-page translated blocks; no full `translation-viewer.tsx` |
+| Backend `POST /translate`, `GET /status`, `GET /structure`, `GET /preview`, `GET /download`, `GET /preview-image` | **Implemented** |
 | Pipeline Phase 1 — Detection | **Implemented** (text-layer probe) |
 | Pipeline Phase 2 — Extraction (DIGITAL) | **Partially Implemented** — text + bbox + font name only |
-| Pipeline Phase 2 — OCR Service (SCANNED) | **Planned** — placeholder block only; Tesseract/PaddleOCR not wired |
+| Pipeline Phase 2 — OCR Service (SCANNED) | **Partially Implemented** - Tesseract/pytesseract is wired for scanned PDFs/images; PaddleOCR is not wired |
 | Pipeline Phase 3 — Language Detection (block-level) | **Partially Implemented** — document-level only today |
 | Pipeline Phase 4 — Translation cascade (exact → normalized → fuzzy → dictionary → unknown) | **Partially Implemented** — exact + fuzzy + word-by-word; no `[UNKNOWN]` marker, no surfaced confidence |
 | Pipeline Phase 4 — Uncertainty Service | **Planned** — no `uncertainty_service.py` |
@@ -23,9 +23,9 @@
 | Job queue (Celery/RQ) | **Planned** — currently `asyncio.create_task` |
 | Object storage (S3/GCS) | **Planned** — currently local filesystem under `tempfile.gettempdir()/bagobo-uploads/jobs/` |
 | Database for job tracking | **Planned** — currently in-memory dict |
-| Pretrained model translation (ByT5 / NLLB) | **Planned** — see model strategy audit; not invoked at runtime |
+| Pretrained model translation (ByT5 / NLLB) | **Planned** — ByT5-small for Bagobo-Tagabawa directions; NLLB-200 distilled 600M for English/Cebuano/Tagalog; not invoked at runtime; do not train from scratch |
 
-The diagram below shows the **target** architecture. Boxes labelled with services that don't exist yet (OCR Service, Uncertainty Service, Side-by-Side Viewer, Document Translation Progress Modal) are aspirational.
+The diagram below shows the **target** architecture. Boxes labelled with services that do not fully exist yet (Uncertainty Service, full Side-by-Side Viewer, Document Translation Progress Modal) are aspirational.
 
 ---
 
@@ -364,11 +364,18 @@ Backend (current):
   • rapidfuzz — fuzzy matching in the translation cascade
   • langdetect — non-Tagabawa language detection
   • openpyxl — optional dataset loader path
-  • pytesseract — declared in requirements but **not imported anywhere** (Planned for OCR)
+  • pytesseract — used by `backend/ocr_stage/ocr_service.py` for scanned PDFs/images
 
-Backend (planned but not installed):
-  • PaddleOCR (preferred) or Tesseract (fallback) — for the SCANNED branch
-  • transformers + sentencepiece + torch — for ByT5-small / NLLB-200 distilled, when fine-tuning is wired
+Backend (planned but not installed in the active backend venv):
+  • PaddleOCR — not wired in active backend code
+  • transformers + sentencepiece + torch — for planned ByT5-small / NLLB-200 distilled fine-tuning/inference
+
+Dataset/model prep:
+  • `backend/translation_data.json` has 1015 phrase rows and is used as phrasebook / translation memory
+  • recommended future training data format is directional JSONL pairs
+  • ByT5-small is planned for Bagobo-Tagabawa directions
+  • NLLB-200 distilled 600M is planned for English-Cebuano-Tagalog directions
+  • do not train from scratch
 
 Storage:
   • Local filesystem (development)

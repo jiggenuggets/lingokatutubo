@@ -2,7 +2,7 @@
 ## Layout-Preserving PDF Translation System
 
 **Version:** 1.1  
-**Last reviewed:** 2026-05-04  
+**Last reviewed:** 2026-05-05
 **Status:** Reference / forward-looking. Most code samples below are **Planned** and not yet present in the repo. See [README.md](../README.md) for the live status table.
 
 > ⚠️ **How to read this file.** This is a target-state implementation reference. The Python and TypeScript snippets here are **design samples**, not the current code. Where the current code differs, follow the reality notes inline.
@@ -13,33 +13,35 @@
 
 ✅ **Implemented**
 - Frontend upload UI ([frontend/app/translate/page.tsx](frontend/app/translate/page.tsx))
-- FastAPI backend with `/translate`, `/status`, `/preview`, `/download`, `/quick-translate`, `/health`, `/preview-image` ([backend/main.py](backend/main.py))
+- FastAPI backend with `/translate`, `/status`, `/structure`, `/preview`, `/download`, `/quick-translate`, `/health`, `/preview-image` ([backend/main.py](backend/main.py))
 - Translation dataset loader with exact + fuzzy (rapidfuzz) + word-by-word fallback ([backend/translation_dataset.py](backend/translation_dataset.py))
 - File upload + job directory + in-memory job tracking
 - Digital PDF text + bbox extraction (PyMuPDF), DOCX paragraph extraction
 - Document-level language detection (langdetect + Tagabawa dictionary)
 - Translated PDF reconstruction (white-box overlay + 11pt insert_text)
 - Bilingual PDF (side-by-side combined)
-- PNG previews for first 2 pages (endpoint exists, frontend does not consume it)
+- PNG previews for first 2 pages; frontend consumes original preview and first-page bilingual blocks
+- Structured page/block JSON endpoint at `/structure/{job_id}`
+- Tesseract/pytesseract OCR path for scanned PDFs/images
 
 ⚠️ **Partially Implemented**
 - PDF reconstruction (no font/size/color adaptation, no shape preservation, no overflow handling)
 - Translation cascade (no `[UNKNOWN]` marker, no confidence surfaced to frontend)
 - Image-block extraction (detected but not redrawn during reconstruction)
+- Side-by-side translation preview (inline original page preview + first-page translated blocks only; no full viewer)
 
 ❌ **Planned — Not Yet Implemented (in priority order)**
-- **OCR for scanned documents** (Phase 3.1 below — sample code only; no `ocr_service.py` exists; `pytesseract` is unused; `backend/ocr_stage/` is empty)
-- **Structured per-block JSON endpoint** for the bilingual UI
-- **Side-by-Side Translation Preview** in the frontend (no `translation-viewer.tsx`)
+- **PaddleOCR for scanned documents** (Tesseract is wired; PaddleOCR is not)
+- **Full Side-by-Side Translation Preview** in the frontend (no `translation-viewer.tsx`)
 - **Document Translation Progress Modal** (no `translation-progress-modal.tsx`)
 - **Per-block language detection** (today's detection runs over the document, not per block)
 - **Uncertainty flagging service** (no `uncertainty_service.py`)
-- **Pretrained model translation** (ByT5-small for Bagobo, NLLB-200 distilled 600M for English/Cebuano/Tagalog) — no model is loaded or invoked at runtime
+- **Pretrained model translation** (ByT5-small planned for Bagobo-Tagabawa directions, NLLB-200 distilled 600M planned for English/Cebuano/Tagalog directions) — no model is loaded or invoked at runtime; do not train from scratch
 - **Layout-preserving font/color/alignment, multi-line wrapping, image/shape redraw**
 
 ---
 
-## Current System Analysis (verified 2026-05-04)
+## Current System Analysis (verified 2026-05-05)
 
 ### Backend Architecture (Current State)
 
@@ -48,15 +50,16 @@ backend/
 ├── main.py                          # ✅ FastAPI app + CORS + endpoints
 ├── models.py                        # ✅ Pydantic models (FileType, JobStatus, etc.)
 ├── file_service.py                  # ✅ File storage + job dir
-├── pipeline_service.py              # ⚠️  Async pipeline; SCANNED branch is mocked
-├── extraction_service.py            # ⚠️  Text/bbox/font-name only; no color/alignment/shapes
+├── pipeline_service.py              # ⚠️  Async pipeline; SCANNED branch calls Tesseract OCR
+├── extraction_service.py            # ⚠️  Text/bbox/span metadata + best-effort tables/drawings
 ├── reconstruction_service.py        # ⚠️  White-box + 11pt insert_text; no shape preservation
 ├── detection_service.py             # ✅ Digital vs scanned (text-layer probe)
 ├── translation_dataset.py           # ✅ Exact + rapidfuzz fuzzy + word-by-word
 ├── language_detection_service.py    # ✅ langdetect + Tagabawa dictionary
 ├── translation_data.json            # ✅ Phrase dataset
-├── ocr_stage/                       # ❌ EMPTY — reserved for OCR (Planned)
-└── requirements.txt                 # ⚠️  pytesseract listed but never imported
+├── export_training_jsonl.py          # ✅ JSONL data-prep utility only; does not train models
+├── ocr_stage/                       # ⚠️  Tesseract-backed OCR service
+└── requirements.txt                 # ⚠️  pytesseract listed; system Tesseract binary still required
 ```
 
 ### Frontend Architecture (Current State)
@@ -65,7 +68,7 @@ backend/
 frontend/
 ├── app/
 │   ├── page.tsx                # ✅ Home
-│   ├── translate/page.tsx      # ⚠️  Upload + status polling + download (no preview)
+│   ├── translate/page.tsx      # ⚠️  Upload + status polling + download + partial preview
 │   └── about/page.tsx          # ✅ About page
 ├── components/
 │   ├── navigation.tsx          # ✅ Navigation
@@ -77,6 +80,16 @@ frontend/
 #   components/translation-viewer.tsx
 #   components/translation-progress-modal.tsx
 ```
+
+### Dataset and Model Preparation Reality
+
+- The active phrase dataset has 1015 rows, not exactly 900.
+- The dataset is a phrasebook / translation memory for exact, fuzzy, and word-by-word lookup.
+- Do not describe it as enough for high-accuracy neural translation.
+- Future training data should be exported as JSONL directional pairs with `source_language`, `target_language`, `source_text`, `target_text`, and provenance metadata.
+- ByT5-small is planned for Bagobo-Tagabawa directions.
+- NLLB-200 distilled 600M is planned for English-Cebuano-Tagalog directions.
+- Do not train from scratch. Future work should adapt pretrained models only after the structured JSON contract, OCR path, and review workflow are stable.
 
 ---
 
@@ -723,13 +736,13 @@ export function TranslationProgressModal({ jobId, onComplete }: ProgressModalPro
 
 ---
 
-### Phase 3: Advanced Features (Week 3-4)  *(All sections below: Planned — Not Yet Implemented)*
+### Phase 3: Advanced Features (Week 3-4)  *(Mixed current and planned work)*
 
-#### 3.1 OCR for Scanned Documents *(Planned)*
+#### 3.1 OCR for Scanned Documents *(Partially Implemented)*
 
-> **Reality:** No OCR code is wired in. The pipeline's SCANNED branch ([backend/pipeline_service.py:262-279](backend/pipeline_service.py)) returns a placeholder block. The snippet below is **a design sample** showing one possible Tesseract integration. The model strategy now favours PaddleOCR over Tesseract — see the standalone model strategy audit; this section will be revisited when OCR work begins.
+> **Reality:** OCR is wired in the active backend. The pipeline's SCANNED branch calls `backend/ocr_stage/ocr_service.py`, which uses Tesseract through `pytesseract` to rasterize scanned PDFs/images, extract text with bboxes and confidence, and surface OCR warnings in `structure.json`. The snippet below remains a design sample and does not exactly match the current implementation. PaddleOCR is not wired.
 
-**File:** `backend/ocr_service.py` (new file — does not exist yet)
+**Current file:** `backend/ocr_stage/ocr_service.py`
 
 ```python
 import pytesseract
@@ -1136,7 +1149,7 @@ numpy>=1.26.0
 pydantic>=2.0.0
 aiofiles>=23.2.1
 reportlab>=4.2.0
-pytesseract>=0.3.13       # ⚠ declared but not imported anywhere
+pytesseract>=0.3.13       # used by backend/ocr_stage/ocr_service.py; system Tesseract required
 rapidfuzz>=3.9.0          # used by translation_dataset.py
 langdetect>=1.0.9
 openpyxl>=3.1.0
@@ -1147,9 +1160,8 @@ openpyxl>=3.1.0
 **Additional packages required by Planned phases (not yet added):**
 
 ```text
-# OCR — pick one when Phase 3.1 is built
-paddleocr>=2.7   # preferred per the model strategy audit
-# (Tesseract path: keep pytesseract + system-installed Tesseract)
+# OCR alternative — not currently wired in active backend code
+paddleocr>=2.7
 
 # Pretrained translation models — Planned (do NOT install until OCR + JSON contract are stable)
 transformers>=4.40

@@ -1,6 +1,6 @@
 # AGENT.md — LingoKatutubo
 
-> **Document type: forward-looking guidance for coding agents.** This file describes how the system is *meant* to behave, not what is fully built today. For the live status table see [README.md](../README.md). Specifically: the OCR branch, the side-by-side viewer, the progress modal, and pretrained-model translation are **Planned**, not implemented.
+> **Document type: forward-looking guidance for coding agents.** This file describes how the system is *meant* to behave, not what is fully built today. For the live status table see [README.md](../README.md). Specifically: full side-by-side viewing, the progress modal, PaddleOCR, and pretrained-model translation are **Planned**. Tesseract OCR and first-page bilingual preview are partially implemented.
 
 ## Project identity
 LingoKatutubo is a layout-aware cross-lingual document learning assistant for Bagobo-Tagabawa and related classroom languages in contextualized IPEd. The system processes uploaded documents, extracts page structure, preserves non-text elements, translates text through a local dataset-driven pipeline, reconstructs the document, and presents side-by-side preview and download outputs.
@@ -20,7 +20,7 @@ Frontend:
 - Next.js 15 + React 19  *(Implemented)*
 - Upload UI  *(Implemented)*
 - Progress modal  *(Planned — currently an inline spinner)*
-- Side-by-side viewer  *(Planned — no component exists yet)*
+- Side-by-side viewer  *(Partially Implemented — original page preview plus first-page translated blocks; no full viewer component yet)*
 - Toolbar for pages, zoom, download  *(Planned — only Download exists)*
 
 Backend:
@@ -28,9 +28,9 @@ Backend:
 - Async job pipeline  *(Implemented; in-memory job store)*
 - PDF extraction  *(Implemented for digital PDFs)*
 - PDF reconstruction  *(Partially Implemented — text-only, no shape preservation)*
-- OCR branch for scanned documents  *(Planned — placeholder only)*
+- OCR branch for scanned documents  *(Partially Implemented — Tesseract/pytesseract, no PaddleOCR)*
 - Translation dataset service  *(Implemented — exact + fuzzy + word-by-word)*
-- Preview image generation  *(Implemented; not consumed by the frontend)*
+- Preview image generation  *(Implemented; frontend consumes original preview and first-page bilingual blocks from `/preview`)*
 
 ## Core architecture
 ### Frontend responsibilities
@@ -152,7 +152,7 @@ Expected OCR outputs:
 OCR is necessary for scanned documents but is not the same as exact layout preservation.
 
 ## Translation policy
-Translation is dataset-first, not API-first.
+Translation is dataset-first, not API-first. The current dataset is a 1015-row phrasebook / translation memory, not enough evidence for high-accuracy neural translation claims.
 Order of decision:
 1. exact phrase match
 2. normalized match
@@ -162,6 +162,9 @@ Order of decision:
 
 Keep translation separate from extraction and reconstruction logic.
 The document pipeline must remain usable even if translation quality is still limited.
+
+## Model preparation policy
+ByT5-small is planned for Bagobo-Tagabawa directions. NLLB-200 distilled 600M is planned for English-Cebuano-Tagalog directions. Neither model is loaded or invoked in the active backend. Prepare JSONL translation pairs for future fine-tuning, but do not train from scratch.
 
 ## Data and orthography rules
 - preserve Bagobo-Tagabawa orthography exactly when sourced from trusted files

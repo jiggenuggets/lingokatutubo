@@ -5,7 +5,7 @@
 **Goal:** Build a layout-aware document translation system for Bagobo-Tagabawa educational materials.  
 **Approach:** Build document processing first, then connect translation datasets later.
 
-> **This is a roadmap, not a status report.** Each phase below is annotated with the labels **Implemented**, **Partially Implemented**, or **Planned** to reflect what exists in code today (2026-05-04). For the live status summary see [README.md](../README.md). For the running system see [RUNNING_GUIDE.md](RUNNING_GUIDE.md).
+> **This is a roadmap, not a status report.** Each phase below is annotated with the labels **Implemented**, **Partially Implemented**, or **Planned** to reflect what exists in code today (2026-05-05). For the live status summary see [README.md](../README.md). For the running system see [RUNNING_GUIDE.md](RUNNING_GUIDE.md).
 
 ### Snapshot of plan status
 
@@ -14,16 +14,16 @@
 | 1 | Project Foundation (frontend + backend skeleton) | **Implemented** |
 | 2 | File Intake / Job Pipeline | **Implemented** (in-memory job store; no `job_store.py` module) |
 | 3 | PDF Type Detection | **Implemented** (text-layer probe; no pdfplumber) |
-| 4 | Digital PDF Extraction | **Partially Implemented** (text + bbox + font name; no color/alignment/lines/shapes) |
-| 5 | Scanned PDF OCR | **Planned** (placeholder only — no Tesseract/PaddleOCR call) |
+| 4 | Digital PDF Extraction | **Partially Implemented** (text + bbox + font name/size/color and best-effort tables/drawings; no alignment/reconstruction fidelity) |
+| 5 | Scanned PDF OCR | **Partially Implemented** (Tesseract/pytesseract wired; PaddleOCR not wired) |
 | 6 | Layout-Aware Reconstruction | **Partially Implemented** (white-box overlay + 11pt insert_text; no font/size adaptation, no shape preservation) |
-| 7 | Preview Generation | **Implemented** (first 2 pages; not consumed by frontend) |
+| 7 | Preview Generation | **Implemented** (first 2 pages; frontend consumes original preview and first-page bilingual blocks) |
 | 8 | Tables | **Planned** |
-| 9 | Translation Dataset Integration | **Implemented** (exact → fuzzy → word-by-word; no `[UNKNOWN]` markers, no confidence surfaced) |
+| 9 | Translation Dataset Integration | **Implemented** (phrasebook / translation memory; exact → fuzzy → word-by-word; not enough for high-accuracy neural translation) |
 | 10 | Language Detection | **Implemented** (langdetect + Tagabawa dictionary) |
 | 11 | Frontend Build Order — upload UI | **Implemented** |
 | 11 | Frontend Build Order — progress modal | **Planned** (currently just an inline spinner) |
-| 11 | Frontend Build Order — side-by-side viewer | **Planned** (no `translation-viewer.tsx`) |
+| 11 | Frontend Build Order — side-by-side viewer | **Partially Implemented** (inline original preview + first-page translated blocks; no full viewer component) |
 
 ---
 
@@ -113,7 +113,7 @@ Detect whether the input PDF is digital or scanned.
 
 ## 4. Phase 4 — Digital PDF Extraction  *(Partially Implemented)*
 
-> **Reality check:** [extraction_service.py](backend/extraction_service.py) extracts page width/height, text blocks, line bboxes, and the **font name** of the first span per line. It does **not** currently capture font size, color, alignment, vector lines, or shapes. Image blocks are detected but no image bytes/coordinates are propagated to reconstruction. There is no `layout_models.py`.
+> **Reality check:** [extraction_service.py](backend/extraction_service.py) extracts page width/height, text blocks, line bboxes, first-span font name/size/color, span metadata, image-block metadata, and best-effort table/drawing metadata. Alignment is not captured, and reconstruction still does not preserve images/shapes with high fidelity. There is no `layout_models.py`.
 
 This is the first major working path.
 
@@ -125,13 +125,13 @@ This is the first major working path.
 - page width / height  *(Implemented)*
 - text blocks  *(Implemented)*
 - bounding boxes  *(Implemented)*
-- font size  *(Planned)*
+- font size  *(Implemented — first span only)*
 - font name  *(Implemented — first span only)*
-- font color  *(Planned)*
+- font color  *(Implemented — first span only)*
 - alignment if possible  *(Planned)*
 - images  *(Partial — detected, not preserved through reconstruction)*
-- lines  *(Planned)*
-- rectangles / shapes  *(Planned)*
+- lines  *(Partially Implemented — drawing metadata only)*
+- rectangles / shapes  *(Partially Implemented — drawing metadata only)*
 
 ### Recommended tools
 - pdfplumber
@@ -154,15 +154,15 @@ This is the first major working path.
 
 ---
 
-## 5. Phase 5 — Scanned PDF OCR Path  *(Planned — Not Yet Implemented)*
+## 5. Phase 5 — Scanned PDF OCR Path  *(Partially Implemented)*
 
-> **Reality check (2026-05-04):** This phase is **not implemented**. The SCANNED branch in `pipeline_service.py` calls `_create_mock_layout_for_scanned()` which returns the literal text `"[Scanned document - OCR not yet implemented]"`. The folder `backend/ocr_stage/` is empty. `pytesseract` is in `requirements.txt` but is not imported anywhere. There is no PaddleOCR. Until this phase is built, **uploading a scanned PDF still produces a "completed" job**, but the translated PDF will only contain the placeholder string.
+> **Reality check (2026-05-05):** The active SCANNED branch in `pipeline_service.py` calls `backend/ocr_stage/ocr_service.py`, which uses Tesseract through `pytesseract` to rasterize scanned PDFs/images, extract OCR text, bboxes, and confidence, and write warnings into `structure.json`. There is no mock placeholder fallback. If OCR is unavailable or extracts no text, the job fails loudly after saving structure warnings. PaddleOCR is not wired in the active backend.
 
 Only after digital extraction works.
 
-### Modules (to be created)
-- `ocr_service.py`
-- `image_preprocess.py`
+### Modules
+- `backend/ocr_stage/ocr_service.py`  *(exists)*
+- `image_preprocess.py`  *(Planned — preprocessing currently lives inside OCRService)*
 
 ### OCR pipeline
 - Convert PDF pages to images
@@ -271,6 +271,15 @@ Do this after the document engine already works.
 3. Fuzzy match
 4. Dictionary fallback
 5. Unknown flag
+
+### Dataset/model reality
+- The active dataset is `backend/translation_data.json` with 1015 phrase rows, not exactly 900.
+- Use it first as a phrasebook / translation memory.
+- Do not claim this dataset is enough for high-accuracy neural translation.
+- Future model preparation should export directional JSONL pairs before any fine-tuning work.
+- ByT5-small is planned for Bagobo-Tagabawa directions.
+- NLLB-200 distilled 600M is planned for English-Cebuano-Tagalog directions.
+- Do not train from scratch; only fine-tune/adapt pretrained models after the document pipeline and review workflow are stable.
 
 ### Why translation comes later
 Because document processing and layout preservation are separate hard problems.

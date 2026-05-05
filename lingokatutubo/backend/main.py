@@ -244,8 +244,9 @@ async def get_structure(job_id: str):
     Return the structured document JSON for a job.
 
     Shape: {job_id, status, detected_type, pages: [{page_number, width, height,
-    rotation, blocks: [{block_id, block_type, bbox, source_text, lines,
-    metadata, detected_language, ocr_confidence}]}], warnings: []}.
+    rotation, blocks: [{block_id, block_type, bbox, source_text,
+    translated_text, translation_method, cascade_stage, translation_confidence,
+    lines, metadata, detected_language, ocr_confidence}]}], warnings: []}.
 
     For digital PDFs, ocr_confidence is null. For scanned PDFs/images,
     Tesseract OCR fills blocks when text is found and warnings explain OCR
