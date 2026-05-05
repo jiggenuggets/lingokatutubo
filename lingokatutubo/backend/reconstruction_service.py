@@ -20,6 +20,32 @@ class ReconstructionService:
             warnings.append(message)
 
     @staticmethod
+    def _coerce_translation_value(value: Any, fallback: str) -> str:
+        """Support both legacy string translations and dict translation records."""
+        if value is None:
+            return fallback
+        if isinstance(value, dict):
+            translated = value.get("translated")
+            if translated is None:
+                return fallback
+            return str(translated)
+        return str(value)
+
+    @classmethod
+    def _translated_text_for_line(
+        cls,
+        translations: Dict[str, Any],
+        lookup_key: str,
+        original_text: str,
+    ) -> str:
+        """Resolve translated text by layout key first, then by original source text."""
+        candidate_keys = [lookup_key, original_text, original_text.strip()]
+        for key in candidate_keys:
+            if key and key in translations:
+                return cls._coerce_translation_value(translations.get(key), original_text)
+        return original_text
+
+    @staticmethod
     def _rect_from_bbox(
         bbox: Any,
         page_rect: fitz.Rect,
@@ -391,7 +417,7 @@ class ReconstructionService:
     def reconstruct_pdf(
         input_pdf_path: str,
         layout_data: List[Dict[str, Any]],
-        translations: Dict[str, Dict[str, str]],
+        translations: Dict[str, Any],
         output_path: str,
         is_scanned: bool = False,
         layout_warnings: Optional[List[str]] = None,
@@ -445,7 +471,11 @@ class ReconstructionService:
                     for line_idx, line in enumerate(lines, start=1):
                         original_text = line.get("text", "")
                         lookup_key = f"{page_num}_{block_idx - 1}"
-                        translated_text = translations.get(lookup_key, {}).get("translated", original_text)
+                        translated_text = ReconstructionService._translated_text_for_line(
+                            translations,
+                            lookup_key,
+                            original_text,
+                        )
                         line_bbox = line.get("bbox")
 
                         if not line_bbox or not translated_text:
