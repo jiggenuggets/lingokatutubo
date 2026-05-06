@@ -51,6 +51,21 @@ const PHASE_LABELS: Record<string, string> = {
   completed: 'Completed',
 };
 
+const normalizeJobStatus = (status?: string): string =>
+  String(status || '').trim().toLowerCase();
+
+const toProgressPercent = (status: JobProgressStatus | null): number | null => {
+  const value =
+    status?.progress_percent !== undefined
+      ? status.progress_percent
+      : status?.progress;
+  if (value === undefined || value === null) return null;
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return null;
+  return Math.max(0, Math.min(100, Math.round(numericValue)));
+};
+
 export default function TranslatePage() {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -89,6 +104,7 @@ export default function TranslatePage() {
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
       clearPolling();
@@ -241,7 +257,12 @@ export default function TranslatePage() {
 
         consecutiveNetworkErrors = 0;
         const data: JobProgressStatus = await res.json();
-        setJobProgress(data);
+        const normalizedStatus = normalizeJobStatus(data.status);
+        const normalizedData = {
+          ...data,
+          status: normalizedStatus,
+        };
+        setJobProgress(normalizedData);
 
         const detectedLanguageValue = data.detected_language;
         if (detectedLanguageValue && !detectionShownRef.current) {
@@ -256,12 +277,12 @@ export default function TranslatePage() {
           }, delay);
         }
 
-        if (data.status === 'completed') {
+        if (normalizedStatus === 'completed') {
           clearPolling();
           setIsDetectingLanguage(false);
           setIsJobComplete(true);
           setJobProgress({
-            ...data,
+            ...normalizedData,
             progress_percent: 100,
             current_phase: data.current_phase ?? 'completed',
             current_step: data.current_step ?? 'Completed',
@@ -270,24 +291,22 @@ export default function TranslatePage() {
           return;
         }
 
-        if (data.status === 'failed') {
+        if (normalizedStatus === 'failed') {
           clearPolling();
           setIsDetectingLanguage(false);
-          setJobProgress(data);
+          setJobProgress(normalizedData);
           setErrorMessage(data.error || data.message || 'Translation failed. Please try again.');
           return;
         }
 
-        if (data.status === 'not_found') {
+        if (normalizedStatus === 'not_found') {
           clearPolling();
           setIsDetectingLanguage(false);
           setErrorMessage('Job not found on the backend. Please upload again.');
           return;
         }
 
-        if (data.status === 'processing' || data.status === 'queued') {
-          pollTimerRef.current = setTimeout(poll, 1500);
-        }
+        pollTimerRef.current = setTimeout(poll, 1500);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
@@ -360,12 +379,7 @@ export default function TranslatePage() {
   const langLabel = (val: string) =>
     TARGET_LANGUAGES.find((l) => l.value === val)?.label ?? val;
 
-  const progressPercent =
-    typeof jobProgress?.progress_percent === 'number'
-      ? Math.max(0, Math.min(100, Math.round(jobProgress.progress_percent)))
-      : typeof jobProgress?.progress === 'number'
-      ? Math.max(0, Math.min(100, Math.round(jobProgress.progress)))
-      : null;
+  const progressPercent = toProgressPercent(jobProgress);
   const progressPhase = jobProgress?.current_phase ?? '';
   const progressStep =
     jobProgress?.current_step ||
