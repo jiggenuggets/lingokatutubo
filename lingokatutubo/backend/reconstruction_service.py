@@ -11,6 +11,7 @@ class ReconstructionService:
     """Rebuilds PDFs with translated text while preserving original layout"""
 
     MIN_FONT_SIZE = 5.5
+    FALLBACK_REVIEW_TEXT = "[UNKNOWN_FOR_REVIEW]"
     _unicode_fontfile_checked = False
     _unicode_fontfile_path: Optional[str] = None
 
@@ -101,6 +102,26 @@ class ReconstructionService:
                 color = spans[0].get("color")
         return cls._rgb_tuple(color, (0.0, 0.0, 0.0))
 
+    @classmethod
+    def _visible_text_color(
+        cls,
+        line: Dict[str, Any],
+        warnings: Optional[List[str]],
+        page_number: int,
+        block_number: int,
+        line_number: int,
+    ) -> Tuple[float, float, float]:
+        color = cls._line_color(line)
+        luminance = (0.2126 * color[0]) + (0.7152 * color[1]) + (0.0722 * color[2])
+        if luminance > 0.88:
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                "translated text color was too light for the white mask; using black.",
+            )
+            return (0.0, 0.0, 0.0)
+        return color
+
     @staticmethod
     def _fontname_for_line(line: Dict[str, Any]) -> str:
         spans = line.get("spans") or []
@@ -173,6 +194,10 @@ class ReconstructionService:
     @staticmethod
     def _needs_unicode_font(text: str) -> bool:
         return any(ord(char) > 255 for char in text)
+
+    @staticmethod
+    def _pdf_safe_text(text: str) -> str:
+        return "".join(char if ord(char) <= 255 else "?" for char in text)
 
     @staticmethod
     def _font(fontname: str, fontfile: Optional[str] = None) -> fitz.Font:
@@ -330,15 +355,18 @@ class ReconstructionService:
         page_number: int,
         block_number: int,
         line_number: int,
-    ) -> None:
+        fallback_text: Optional[str] = None,
+    ) -> bool:
+        fallback_text = (fallback_text or cls.FALLBACK_REVIEW_TEXT).strip() or cls.FALLBACK_REVIEW_TEXT
         fontname = cls._fontname_for_line(line)
         unicode_fontfile = cls._unicode_fontfile() if cls._needs_unicode_font(text) else None
         if cls._needs_unicode_font(text) and not unicode_fontfile:
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                "no Unicode PDF font was found; some translated characters may render incorrectly.",
+                "no Unicode PDF font was found; unsupported translated characters were replaced.",
             )
+            text = cls._pdf_safe_text(text)
 
         base_font_size = cls._base_font_size(line, rect)
         fitted_text, fontsize, shrunk, truncated = cls._fit_text_to_rect(
@@ -352,9 +380,14 @@ class ReconstructionService:
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                "translated text could not fit inside its bbox and was skipped.",
+                "translated text could not fit inside its bbox; using visible fallback text.",
             )
-            return
+            fitted_text, fontsize, shrunk, truncated = cls._fit_text_to_rect(
+                fallback_text,
+                rect,
+                "helv",
+                min(base_font_size, 8.0),
+            )
 
         if shrunk:
             cls._append_warning(
@@ -369,7 +402,13 @@ class ReconstructionService:
                 "translated text exceeded its bbox and was truncated.",
             )
 
-        color = cls._line_color(line)
+        color = cls._visible_text_color(
+            line,
+            warnings,
+            page_number,
+            block_number,
+            line_number,
+        )
         candidates: List[Tuple[str, Optional[str]]] = (
             [("LinguaSans", unicode_fontfile)]
             if unicode_fontfile
@@ -393,7 +432,7 @@ class ReconstructionService:
                     **insert_args,
                 )
                 if result >= -0.01:
-                    return
+                    return True
             except Exception as e:
                 if candidate_fontfile:
                     cls._append_warning(
@@ -410,8 +449,56 @@ class ReconstructionService:
         cls._append_warning(
             warnings,
             f"Page {page_number}, block {block_number}, line {line_number}: "
-            "translated text did not fit after font reduction.",
+            "translated text did not fit after font reduction; using visible fallback text.",
         )
+        fallback_candidates = []
+        for candidate in (fallback_text, cls.FALLBACK_REVIEW_TEXT):
+            safe_candidate = cls._pdf_safe_text(candidate)
+            if safe_candidate and safe_candidate not in fallback_candidates:
+                fallback_candidates.append(safe_candidate)
+
+        for candidate in fallback_candidates:
+            fitted_fallback, fallback_size, _, _ = cls._fit_text_to_rect(
+                candidate,
+                rect,
+                "helv",
+                min(base_font_size, 8.0),
+            )
+            visible_fallback = fitted_fallback.strip() or cls.FALLBACK_REVIEW_TEXT
+            try:
+                result = page.insert_textbox(
+                    rect,
+                    visible_fallback,
+                    fontsize=fallback_size,
+                    fontname="helv",
+                    color=(0.0, 0.0, 0.0),
+                    align=fitz.TEXT_ALIGN_LEFT,
+                    overlay=True,
+                )
+                if result >= -0.01:
+                    return True
+            except Exception:
+                pass
+
+            try:
+                baseline_y = max(rect.y0 + cls.MIN_FONT_SIZE, min(rect.y1 - 1, rect.y0 + fallback_size))
+                page.insert_text(
+                    (rect.x0 + 0.5, baseline_y),
+                    visible_fallback.splitlines()[0],
+                    fontsize=max(4.0, min(fallback_size, cls.MIN_FONT_SIZE)),
+                    fontname="helv",
+                    color=(0.0, 0.0, 0.0),
+                    overlay=True,
+                )
+                return True
+            except Exception as e:
+                cls._append_warning(
+                    warnings,
+                    f"Page {page_number}, block {block_number}, line {line_number}: "
+                    f"failed to insert fallback text: {e}",
+                )
+
+        return False
     
     @staticmethod
     def reconstruct_pdf(
@@ -505,7 +592,7 @@ class ReconstructionService:
                                 width=0,
                                 overlay=True,
                             )
-                            ReconstructionService._insert_text_in_rect(
+                            inserted = ReconstructionService._insert_text_in_rect(
                                 page,
                                 rect,
                                 translated_text,
@@ -514,7 +601,14 @@ class ReconstructionService:
                                 page_num + 1,
                                 block_idx,
                                 line_idx,
+                                fallback_text=original_text or ReconstructionService.FALLBACK_REVIEW_TEXT,
                             )
+                            if not inserted:
+                                ReconstructionService._append_warning(
+                                    layout_warnings,
+                                    f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
+                                    "white mask was drawn but no replacement text could be inserted.",
+                                )
                         except Exception as e:
                             print(f"[Reconstruction] Error inserting text: {e}")
                             ReconstructionService._append_warning(

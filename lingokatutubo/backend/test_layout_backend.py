@@ -232,6 +232,85 @@ class ReconstructionTests(unittest.TestCase):
         self.assertEqual(round(out_doc[0].rect.height), 220)
         out_doc.close()
 
+    def test_reconstruction_inserts_visible_fallback_when_translation_cannot_fit(self):
+        input_pdf = self.tmp_path / "input.pdf"
+        output_pdf = self.tmp_path / "translated-fallback.pdf"
+        self._write_base_pdf(input_pdf)
+
+        layout_data = [{
+            "page": 0,
+            "width": 320,
+            "height": 220,
+            "blocks": [{
+                "type": "text",
+                "bbox": [40, 58, 45, 62],
+                "lines": [{
+                    "text": "Hello",
+                    "bbox": [40, 58, 45, 62],
+                    "font": "Helvetica",
+                    "size": 12,
+                    "color": [0, 0, 0],
+                }],
+            }],
+        }]
+        warnings = []
+
+        ok = ReconstructionService.reconstruct_pdf(
+            str(input_pdf),
+            layout_data,
+            {"Hello": "This replacement cannot fit in the tiny bbox"},
+            str(output_pdf),
+            layout_warnings=warnings,
+        )
+
+        self.assertTrue(ok)
+        out_doc = fitz.open(output_pdf)
+        extracted = out_doc[0].get_text()
+        out_doc.close()
+
+        self.assertIn("Hello", extracted)
+        self.assertFalse(any("skipped" in warning for warning in warnings))
+        self.assertTrue(any("fallback" in warning for warning in warnings))
+
+    def test_reconstruction_forces_visible_color_over_white_mask(self):
+        input_pdf = self.tmp_path / "input-white-text.pdf"
+        output_pdf = self.tmp_path / "translated-visible-color.pdf"
+        self._write_base_pdf(input_pdf)
+
+        layout_data = [{
+            "page": 0,
+            "width": 320,
+            "height": 220,
+            "blocks": [{
+                "type": "text",
+                "bbox": [40, 58, 140, 75],
+                "lines": [{
+                    "text": "Hello",
+                    "bbox": [40, 58, 140, 75],
+                    "font": "Helvetica",
+                    "size": 12,
+                    "color": [1, 1, 1],
+                }],
+            }],
+        }]
+        warnings = []
+
+        ok = ReconstructionService.reconstruct_pdf(
+            str(input_pdf),
+            layout_data,
+            {"Hello": "wayig"},
+            str(output_pdf),
+            layout_warnings=warnings,
+        )
+
+        self.assertTrue(ok)
+        out_doc = fitz.open(output_pdf)
+        extracted = out_doc[0].get_text()
+        out_doc.close()
+
+        self.assertIn("wayig", extracted)
+        self.assertTrue(any("too light" in warning for warning in warnings))
+
     def test_preview_prefixes_prevent_original_translated_overwrite(self):
         input_pdf = self.tmp_path / "input.pdf"
         output_pdf = self.tmp_path / "translated.pdf"

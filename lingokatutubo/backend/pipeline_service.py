@@ -878,6 +878,7 @@ class PipelineService:
                             page_idx + 1,
                             block_idx,
                             line_idx,
+                            fallback_text=original or self.reconstruction_service.FALLBACK_REVIEW_TEXT,
                         )
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
