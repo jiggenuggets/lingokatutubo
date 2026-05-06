@@ -17,29 +17,98 @@ import glob as _glob
 import json
 import os
 import re
+import unicodedata
 from typing import Dict, List, Optional
 
 SUPPORTED_LANGS = ["english", "tagabawa", "filipino", "cebuano"]
+UNKNOWN_FOR_REVIEW = "[UNKNOWN_FOR_REVIEW]"
+
+_LANG_ALIASES = {
+    "bagobo": "tagabawa",
+    "tagabawa": "tagabawa",
+    "bagobo-tagabawa": "tagabawa",
+    "bagobo_tagabawa": "tagabawa",
+    "bagobo tagabawa": "tagabawa",
+    "bgs": "tagabawa",
+    "english": "english",
+    "en": "english",
+    "eng": "english",
+    "filipino": "filipino",
+    "tagalog": "filipino",
+    "fil": "filipino",
+    "tgl": "filipino",
+    "cebuano": "cebuano",
+    "ceb": "cebuano",
+    "bisaya": "cebuano",
+    "visayan": "cebuano",
+}
 
 # --- Column normalization for CSV/Excel loaders ---
 _COL_ALIASES = {
     "tagalog": "filipino_source",
     "bagobo": "tagabawa_source",
     "bagobo-tagabawa": "tagabawa_source",
+    "bagobo_tagabawa": "tagabawa_source",
+    "bagobo tagabawa": "tagabawa_source",
+    "bgs": "tagabawa_source",
+    "en": "english_source",
+    "eng": "english_source",
+    "fil": "filipino_source",
+    "tgl": "filipino_source",
+    "ceb": "cebuano_source",
     "bisaya": "cebuano_source",
+    "visayan": "cebuano_source",
 }
 
 
 def _normalize_column(header: str) -> Optional[str]:
     """Map a raw CSV/Excel column header to its canonical {lang}_source key."""
-    h = header.strip().lower()
+    raw = str(header or "").strip().lower()
+    if raw in (f"{l}_source" for l in SUPPORTED_LANGS):
+        return raw
+
+    h = _normalize_alias_key(header)
     if h in _COL_ALIASES:
         return _COL_ALIASES[h]
-    if h in (f"{l}_source" for l in SUPPORTED_LANGS):
-        return h
-    if h in SUPPORTED_LANGS:
-        return f"{h}_source"
+    canonical_lang = _normalize_lang(h)
+    if canonical_lang in SUPPORTED_LANGS:
+        return f"{canonical_lang}_source"
     return None
+
+
+def _normalize_alias_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower().replace("_", " "))
+
+
+def _strip_diacritics(value: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(char)
+    )
+
+
+def _normalize_lookup_text(value: str, *, strip_diacritics: bool = False) -> str:
+    text = str(value or "").strip().lower()
+    if strip_diacritics:
+        text = _strip_diacritics(text)
+    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _lookup_variants(value: str) -> List[str]:
+    raw = str(value or "").strip().lower()
+    variants = [
+        raw,
+        _normalize_lookup_text(value),
+        _normalize_lookup_text(value, strip_diacritics=True),
+    ]
+    output: List[str] = []
+    for variant in variants:
+        if variant and variant not in output:
+            output.append(variant)
+    return output
 
 
 class TranslationDataset:
@@ -313,13 +382,13 @@ class TranslationDataset:
                 text = row.get(f"{lang}_source", "").strip()
                 if not text:
                     continue
-                norm = text.lower()
 
                 # Phrase index
-                self._phrase_indices[lang].setdefault(norm, []).append(row)
+                for norm in _lookup_variants(text):
+                    self._phrase_indices[lang].setdefault(norm, []).append(row)
 
                 # Word index
-                for word in re.findall(r"\b\w+\b", norm):
+                for word in re.findall(r"\b\w+\b", _normalize_lookup_text(text, strip_diacritics=True)):
                     self._word_indices[lang].setdefault(word, []).append(row)
 
     # ------------------------------------------------------------------
@@ -361,30 +430,34 @@ class TranslationDataset:
         """
         original = text.strip()
         if not self.is_loaded or not text.strip():
-            return _translation_result(text, "untranslated", 0.0)
-
-        if source_lang == target_lang:
-            return _translation_result(text, "identity", 1.0)
+            return _translation_result(UNKNOWN_FOR_REVIEW, "unknown_for_review", 0.0)
 
         # Normalize language aliases
         source_lang = _normalize_lang(source_lang)
         target_lang = _normalize_lang(target_lang)
 
-        norm = original.lower()
+        if source_lang == target_lang:
+            return _translation_result(text, "identity", 1.0)
+
         target_key = f"{target_lang}_source"
         src_index = self._phrase_indices.get(source_lang, {})
 
         # 1. Exact match
-        result = _first_result(src_index.get(norm, []), target_key)
-        if result:
-            return _translation_result(
-                _preserve_case(original, result),
-                "exact_phrase",
-                1.0,
-            )
+        for norm in _lookup_variants(original):
+            result = _first_result(src_index.get(norm, []), target_key)
+            if result:
+                return _translation_result(
+                    _preserve_case(original, result),
+                    "exact_phrase",
+                    1.0,
+                )
 
         # 2. Fuzzy match (rapidfuzz)
-        fuzzy = self._fuzzy_match(norm, src_index, target_key)
+        fuzzy = self._fuzzy_match(
+            _normalize_lookup_text(original, strip_diacritics=True),
+            src_index,
+            target_key,
+        )
         result = fuzzy["translated"] if fuzzy else None
         if result:
             return _translation_result(
@@ -397,7 +470,7 @@ class TranslationDataset:
         word_result = self._translate_words(original, source_lang, target_lang)
         if word_result != original:
             return _translation_result(word_result, "word_by_word", 0.55)
-        return _translation_result(original, "untranslated", 0.0)
+        return _translation_result(UNKNOWN_FOR_REVIEW, "unknown_for_review", 0.0)
 
     def _fuzzy_match(
         self,
@@ -451,7 +524,7 @@ class TranslationDataset:
                 translated.append(part)
                 continue
 
-            clean = re.sub(r"[^\w\-]", "", part).lower()
+            clean = _normalize_lookup_text(part, strip_diacritics=True)
             t = _first_result(word_idx.get(clean, []), target_key)
             if t:
                 word = t.strip().split()[0]
@@ -484,17 +557,15 @@ class TranslationDataset:
 # ------------------------------------------------------------------
 
 def _normalize_lang(lang: str) -> str:
-    aliases = {
-        "bagobo-tagabawa": "tagabawa",
-        "bagobo": "tagabawa",
-        "tagabawa": "tagabawa",
-        "filipino": "filipino",
-        "tagalog": "filipino",
-        "english": "english",
-        "cebuano": "cebuano",
-        "bisaya": "cebuano",
-    }
-    return aliases.get(lang.lower(), lang.lower())
+    normalized = _normalize_alias_key(lang)
+    hyphenated = normalized.replace(" ", "-")
+    underscored = normalized.replace(" ", "_")
+    return (
+        _LANG_ALIASES.get(normalized)
+        or _LANG_ALIASES.get(hyphenated)
+        or _LANG_ALIASES.get(underscored)
+        or normalized
+    )
 
 
 def _first_result(rows: List[Dict], key: str) -> Optional[str]:

@@ -16,7 +16,7 @@ from file_service import get_file_service
 from detection_service import get_detection_service
 from extraction_service import get_extraction_service
 from reconstruction_service import get_reconstruction_service
-from translation_dataset import get_translation_dataset
+from translation_dataset import UNKNOWN_FOR_REVIEW, get_translation_dataset
 from language_detection_service import get_language_detection_service
 from ocr_stage import OCRUnavailableError, get_ocr_service
 
@@ -227,7 +227,16 @@ class PipelineService:
             print(f"[Pipeline] Phase 3: Translating text ({source_language} -> {target_language})")
             job.progress = 50
 
-            translations = self._translate_layout(layout_data, source_language, target_language)
+            translation_warnings: List[str] = []
+            translations = self._translate_layout(
+                layout_data,
+                source_language,
+                target_language,
+                translation_warnings=translation_warnings,
+            )
+            if translation_warnings:
+                job.metadata["translation_warnings"] = translation_warnings
+                self._append_structure_warnings(job_id, translation_warnings)
 
             # Debug: log first 10 translation pairs to backend console
             _sample = list(translations.items())[:10]
@@ -328,7 +337,8 @@ class PipelineService:
         self,
         layout_data: list,
         source_lang: str,
-        target_lang: str
+        target_lang: str,
+        translation_warnings: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, str]]:
         """
         Translate all text in layout data
@@ -352,23 +362,37 @@ class PipelineService:
                     if not original:
                         continue
                     
-                    if hasattr(self.translation_dataset, "translate_phrase_with_metadata"):
-                        translation_meta = self.translation_dataset.translate_phrase_with_metadata(
-                            original,
-                            source_lang=source_lang,
-                            target_lang=target_lang
+                    try:
+                        if hasattr(self.translation_dataset, "translate_phrase_with_metadata"):
+                            translation_meta = self.translation_dataset.translate_phrase_with_metadata(
+                                original,
+                                source_lang=source_lang,
+                                target_lang=target_lang
+                            )
+                        else:
+                            translated = self.translation_dataset.translate_phrase(
+                                original,
+                                source_lang=source_lang,
+                                target_lang=target_lang
+                            )
+                            translation_meta = {
+                                "translated": translated,
+                                "method": "unknown",
+                                "cascade_stage": "unknown",
+                                "confidence": None,
+                            }
+                    except Exception as exc:
+                        message = (
+                            f"Page {page_index + 1}, block {block_index + 1}, line {line_index + 1}: "
+                            f"translation failed for {source_lang}->{target_lang}: {exc}"
                         )
-                    else:
-                        translated = self.translation_dataset.translate_phrase(
-                            original,
-                            source_lang=source_lang,
-                            target_lang=target_lang
-                        )
+                        if translation_warnings is not None and message not in translation_warnings:
+                            translation_warnings.append(message)
                         translation_meta = {
-                            "translated": translated,
-                            "method": "unknown",
-                            "cascade_stage": "unknown",
-                            "confidence": None,
+                            "translated": UNKNOWN_FOR_REVIEW,
+                            "method": "unknown_for_review",
+                            "cascade_stage": "unknown_for_review",
+                            "confidence": 0.0,
                         }
 
                     block_id = f"{page_index}_{block_index}"
