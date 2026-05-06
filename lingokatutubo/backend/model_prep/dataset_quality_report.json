@@ -1,0 +1,67 @@
+{
+  "total_rows": 1015,
+  "usable_rows": 1015,
+  "skipped_rows": 0,
+  "language_fields": [
+    "english",
+    "tagabawa",
+    "filipino",
+    "cebuano"
+  ],
+  "missing_values_by_language": {
+    "english": 0,
+    "tagabawa": 0,
+    "filipino": 0,
+    "cebuano": 0
+  },
+  "duplicate_full_row_count": 7,
+  "replacement_character_row_count": 0,
+  "replacement_character_row_ids": [],
+  "control_character_row_count": 0,
+  "control_character_row_ids": [],
+  "tagabawa_rows_with_diacritics": 661,
+  "direction_counts": {
+    "cebuano->english": 1015,
+    "cebuano->filipino": 1015,
+    "cebuano->tagabawa": 1015,
+    "english->cebuano": 1015,
+    "english->filipino": 1015,
+    "english->tagabawa": 1015,
+    "filipino->cebuano": 1015,
+    "filipino->english": 1015,
+    "filipino->tagabawa": 1015,
+    "tagabawa->cebuano": 1015,
+    "tagabawa->english": 1015,
+    "tagabawa->filipino": 1015
+  },
+  "split_counts": {
+    "dev": 1224,
+    "test": 1212,
+    "train": 9744
+  },
+  "split_row_counts": {
+    "dev": 102,
+    "test": 101,
+    "train": 812
+  },
+  "sme_verified_rows": 0,
+  "unverified_rows": 1015,
+  "rows_marked_for_manual_or_double_check": 30,
+  "auto_split_rows": 346,
+  "unknown_fallback_records": 0,
+  "split_leakage_duplicate_pairs": [],
+  "nmt_readiness": "ready_for_small_experimental_fine_tuning",
+  "files": {
+    "all": "C:\\Users\\wapak\\Downloads\\YAWA\\lingokatutubo\\backend\\model_prep\\translation_pairs_all.jsonl",
+    "train": "C:\\Users\\wapak\\Downloads\\YAWA\\lingokatutubo\\backend\\model_prep\\translation_pairs_train.jsonl",
+    "dev": "C:\\Users\\wapak\\Downloads\\YAWA\\lingokatutubo\\backend\\model_prep\\translation_pairs_dev.jsonl",
+    "test": "C:\\Users\\wapak\\Downloads\\YAWA\\lingokatutubo\\backend\\model_prep\\translation_pairs_test.jsonl",
+    "report": "C:\\Users\\wapak\\Downloads\\YAWA\\lingokatutubo\\backend\\model_prep\\dataset_quality_report.json"
+  },
+  "record_counts": {
+    "all": 12180,
+    "train": 9744,
+    "dev": 1224,
+    "test": 1212
+  }
+}

@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from pipeline_service import PipelineService
+from export_training_jsonl import REQUIRED_DIRECTIONS, export_jsonl
 from translation_dataset import UNKNOWN_FOR_REVIEW, TranslationDataset
 
 
@@ -131,6 +132,99 @@ class TranslationDatasetReverseLookupTests(unittest.TestCase):
         self.assertEqual(record["translated"], UNKNOWN_FOR_REVIEW)
         self.assertEqual(record["method"], "unknown_for_review")
         self.assertEqual(record["confidence"], 0.0)
+
+
+class TrainingJsonlExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmp_path = Path(self.tmp.name)
+        rows = []
+        for index in range(1, 11):
+            rows.append(
+                {
+                    "id": index,
+                    "topic": "export",
+                    "tagabawa": f"Madigár {index}",
+                    "english": f"Hello {index}",
+                    "filipino": f"Kamusta {index}",
+                    "cebuano": f"Kumusta {index}",
+                    "source": "phrasebook",
+                    "notes": "manual check" if index == 2 else "",
+                }
+            )
+        # Duplicate a complete phrase row to verify duplicate pairs stay in
+        # one split instead of leaking into train/dev/test separately.
+        rows[-1].update(
+            {
+                "tagabawa": rows[0]["tagabawa"],
+                "english": rows[0]["english"],
+                "filipino": rows[0]["filipino"],
+                "cebuano": rows[0]["cebuano"],
+            }
+        )
+        self.dataset_path = self.tmp_path / "translation_data.json"
+        self.dataset_path.write_text(
+            json.dumps({"rows": rows}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def read_jsonl(path: Path) -> list:
+        with path.open("r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def test_export_writes_required_directions_splits_and_metadata(self):
+        output_dir = self.tmp_path / "model_prep"
+        report = export_jsonl(str(self.dataset_path), str(output_dir), seed=7)
+
+        all_records = self.read_jsonl(output_dir / "translation_pairs_all.jsonl")
+        train_records = self.read_jsonl(output_dir / "translation_pairs_train.jsonl")
+        dev_records = self.read_jsonl(output_dir / "translation_pairs_dev.jsonl")
+        test_records = self.read_jsonl(output_dir / "translation_pairs_test.jsonl")
+
+        self.assertEqual(len(all_records), 10 * len(REQUIRED_DIRECTIONS))
+        self.assertEqual(len(train_records), 8 * len(REQUIRED_DIRECTIONS))
+        self.assertEqual(len(dev_records), 1 * len(REQUIRED_DIRECTIONS))
+        self.assertEqual(len(test_records), 1 * len(REQUIRED_DIRECTIONS))
+
+        first = all_records[0]
+        for key in (
+            "id",
+            "source_lang",
+            "target_lang",
+            "source_text",
+            "target_text",
+            "domain",
+            "verified_by_sme",
+            "quality_score",
+            "notes",
+            "metadata",
+            "row_id",
+            "split",
+        ):
+            self.assertIn(key, first)
+
+        self.assertEqual(
+            set(report["direction_counts"].keys()),
+            {f"{source}->{target}" for source, target in REQUIRED_DIRECTIONS},
+        )
+        self.assertEqual(report["record_counts"]["all"], len(all_records))
+        self.assertEqual(report["unknown_fallback_records"], 0)
+        self.assertEqual(report["split_leakage_duplicate_pairs"], [])
+        self.assertGreater(report["tagabawa_rows_with_diacritics"], 0)
+
+        with (output_dir / "dataset_quality_report.json").open("r", encoding="utf-8") as f:
+            saved_report = json.load(f)
+        self.assertEqual(saved_report["duplicate_full_row_count"], 1)
+
+    def test_export_preserves_diacritics(self):
+        output_dir = self.tmp_path / "model_prep"
+        export_jsonl(str(self.dataset_path), str(output_dir), seed=7)
+
+        exported_text = (output_dir / "translation_pairs_all.jsonl").read_text(encoding="utf-8")
+        self.assertIn("Madigár", exported_text)
+        self.assertNotIn(UNKNOWN_FOR_REVIEW, exported_text)
 
 
 def main():
