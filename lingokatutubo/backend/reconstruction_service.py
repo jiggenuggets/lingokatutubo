@@ -10,7 +10,10 @@ from typing import List, Dict, Any, Optional, Tuple
 class ReconstructionService:
     """Rebuilds PDFs with translated text while preserving original layout"""
 
+    READABLE_MIN_FONT_SIZE = 7.5
     MIN_FONT_SIZE = 5.5
+    LINE_HEIGHT_FACTOR = 1.12
+    HEAVY_SHRINK_RATIO = 0.72
     FALLBACK_REVIEW_TEXT = "[UNKNOWN_FOR_REVIEW]"
     _unicode_fontfile_checked = False
     _unicode_fontfile_path: Optional[str] = None
@@ -299,10 +302,23 @@ class ReconstructionService:
 
     @staticmethod
     def _line_height(fontsize: float) -> float:
-        return fontsize * 1.18
+        return fontsize * ReconstructionService.LINE_HEIGHT_FACTOR
+
+    @classmethod
+    def _effective_min_font_size(cls, rect: fitz.Rect) -> float:
+        """Prefer readable text, but allow smaller text when the bbox is tiny."""
+        usable_single_line_size = max(
+            cls.MIN_FONT_SIZE,
+            (max(1.0, rect.height) - 0.25) / cls.LINE_HEIGHT_FACTOR,
+        )
+        return max(
+            cls.MIN_FONT_SIZE,
+            min(cls.READABLE_MIN_FONT_SIZE, usable_single_line_size),
+        )
 
     @classmethod
     def _base_font_size(cls, line: Dict[str, Any], rect: fitz.Rect) -> float:
+        min_font_size = cls._effective_min_font_size(rect)
         size = line.get("size")
         if size is None:
             spans = line.get("spans") or []
@@ -311,10 +327,10 @@ class ReconstructionService:
         try:
             size = float(size)
         except Exception:
-            size = min(11.0, max(cls.MIN_FONT_SIZE, rect.height * 0.72))
+            size = min(11.0, max(min_font_size, rect.height * 0.78))
 
-        max_single_line_size = max(cls.MIN_FONT_SIZE, rect.height * 0.82)
-        return max(cls.MIN_FONT_SIZE, min(size, max_single_line_size))
+        max_single_line_size = max(min_font_size, rect.height * 0.88)
+        return max(min_font_size, min(size, max_single_line_size))
 
     @classmethod
     def _fit_text_to_rect(
@@ -328,10 +344,11 @@ class ReconstructionService:
         font = cls._font(fontname, fontfile=fontfile)
         max_width = max(1.0, rect.width)
         max_height = max(1.0, rect.height)
-        fontsize = base_font_size
+        min_font_size = cls._effective_min_font_size(rect)
+        fontsize = max(base_font_size, min_font_size)
         shrunk = False
 
-        while fontsize >= cls.MIN_FONT_SIZE:
+        while fontsize >= min_font_size:
             lines = cls._wrap_text(text, font, fontsize, max_width)
             required_height = max(1, len(lines)) * cls._line_height(fontsize)
             if required_height <= max_height + 0.25:
@@ -339,7 +356,7 @@ class ReconstructionService:
             fontsize -= 0.5
             shrunk = True
 
-        fontsize = cls.MIN_FONT_SIZE
+        fontsize = min_font_size
         lines = cls._wrap_text(text, font, fontsize, max_width)
         max_lines = max(1, int(max_height / cls._line_height(fontsize)))
         truncated = len(lines) > max_lines
@@ -365,6 +382,12 @@ class ReconstructionService:
         fallback_text = (fallback_text or cls.FALLBACK_REVIEW_TEXT).strip() or cls.FALLBACK_REVIEW_TEXT
         fontname = cls._fontname_for_line(line)
         unicode_fontfile = cls._unicode_fontfile() if cls._needs_unicode_font(text) else None
+        if unicode_fontfile:
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                "translated text uses Unicode characters; using an embedded system font.",
+            )
         if cls._needs_unicode_font(text) and not unicode_fontfile:
             cls._append_warning(
                 warnings,
@@ -399,6 +422,18 @@ class ReconstructionService:
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
                 f"translated text was too long for its bbox; font reduced to {fontsize:.1f}pt.",
+            )
+        if fontsize < cls.READABLE_MIN_FONT_SIZE:
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                f"text bbox is too small for the readable font floor; using {fontsize:.1f}pt.",
+            )
+        elif fontsize <= max(cls.MIN_FONT_SIZE, base_font_size * cls.HEAVY_SHRINK_RATIO):
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                "translated text was heavily shrunk to preserve bbox fit.",
             )
         if truncated:
             cls._append_warning(

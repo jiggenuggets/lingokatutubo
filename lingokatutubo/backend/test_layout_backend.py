@@ -232,6 +232,56 @@ class ReconstructionTests(unittest.TestCase):
         self.assertEqual(round(out_doc[0].rect.height), 220)
         out_doc.close()
 
+    def test_fit_text_prefers_readable_minimum_before_truncating(self):
+        rect = fitz.Rect(40, 58, 88, 74)
+
+        fitted, fontsize, shrunk, truncated = ReconstructionService._fit_text_to_rect(
+            "This translated phrase is much longer than the original line",
+            rect,
+            "helv",
+            12,
+        )
+
+        self.assertTrue(shrunk)
+        self.assertTrue(truncated)
+        self.assertGreaterEqual(fontsize, ReconstructionService.READABLE_MIN_FONT_SIZE)
+        self.assertIn("...", fitted)
+
+    def test_reconstruction_truncates_long_text_with_readable_font_warning(self):
+        input_pdf = self.tmp_path / "input-readable.pdf"
+        output_pdf = self.tmp_path / "translated-readable.pdf"
+        self._write_base_pdf(input_pdf)
+
+        layout_data = [{
+            "page": 0,
+            "width": 320,
+            "height": 220,
+            "blocks": [{
+                "type": "text",
+                "bbox": [40, 58, 95, 76],
+                "lines": [{
+                    "text": "Hello",
+                    "bbox": [40, 58, 95, 76],
+                    "font": "Helvetica",
+                    "size": 12,
+                    "color": [0, 0, 0],
+                }],
+            }],
+        }]
+        warnings = []
+
+        ok = ReconstructionService.reconstruct_pdf(
+            str(input_pdf),
+            layout_data,
+            {"Hello": "This translated phrase is much longer than the source box"},
+            str(output_pdf),
+            layout_warnings=warnings,
+        )
+
+        self.assertTrue(ok)
+        self.assertTrue(any("truncated" in warning for warning in warnings))
+        self.assertFalse(any("5.5pt" in warning for warning in warnings))
+
     def test_reconstruction_inserts_visible_fallback_when_translation_cannot_fit(self):
         input_pdf = self.tmp_path / "input.pdf"
         output_pdf = self.tmp_path / "translated-fallback.pdf"
@@ -397,13 +447,14 @@ class ReconstructionTests(unittest.TestCase):
                 }],
             }],
         }]
+        warnings = []
 
         ok = ReconstructionService.reconstruct_pdf(
             str(input_pdf),
             layout_data,
             {"Hello": "kann\u0119"},
             str(output_pdf),
-            layout_warnings=[],
+            layout_warnings=warnings,
         )
 
         self.assertTrue(ok)
@@ -411,6 +462,7 @@ class ReconstructionTests(unittest.TestCase):
         extracted = out_doc[0].get_text()
         out_doc.close()
         self.assertIn("kann\u0119", extracted)
+        self.assertTrue(any("Unicode" in warning for warning in warnings))
 
 
 class StructureJsonTests(unittest.TestCase):
