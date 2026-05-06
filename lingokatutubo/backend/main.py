@@ -201,6 +201,10 @@ async def get_status(job_id: str) -> dict:
             "status": "not_found",
             "message": "Job not found",
             "output_file": None,
+            "progress_percent": 0,
+            "current_phase": "not_found",
+            "current_step": "Job not found",
+            "phase_message": "Job not found",
             "error": "Job not found"
         }
 
@@ -225,9 +229,13 @@ async def get_status(job_id: str) -> dict:
     return {
         "job_id": job_id,
         "status": job_status.status,
-        "message": message,
+        "message": job_status.phase_message or message,
         "output_file": output_file,
         "progress": job_status.progress,
+        "progress_percent": 100 if job_status.status == "completed" else job_status.progress,
+        "current_phase": job_status.current_phase,
+        "current_step": job_status.current_step,
+        "phase_message": job_status.phase_message or message,
         "detection_type": job_status.detection_type.value if job_status.detection_type else None,
         "file_type": job_status.file_type.value if job_status.file_type else None,
         "error": job_status.error,

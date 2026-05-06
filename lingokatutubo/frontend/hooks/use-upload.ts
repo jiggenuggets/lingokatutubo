@@ -7,6 +7,10 @@ export interface UploadResponse {
   job_id: string;
   status: string;
   message: string;
+  progress_percent?: number;
+  current_phase?: string;
+  current_step?: string;
+  phase_message?: string;
 }
 
 export interface UploadError {

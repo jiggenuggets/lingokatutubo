@@ -21,6 +21,55 @@ from language_detection_service import get_language_detection_service
 from ocr_stage import OCRUnavailableError, get_ocr_service
 
 
+PIPELINE_PHASES = {
+    "queued": {
+        "percent": 0,
+        "step": "Queued for processing",
+        "message": "Document is waiting to be processed.",
+    },
+    "detecting": {
+        "percent": 10,
+        "step": "Detecting document type",
+        "message": "Detecting document type...",
+    },
+    "extracting": {
+        "percent": 25,
+        "step": "Extracting text and layout",
+        "message": "Extracting text and layout...",
+    },
+    "ocr": {
+        "percent": 25,
+        "step": "Running OCR for scanned document",
+        "message": "Running OCR for scanned document...",
+    },
+    "translating": {
+        "percent": 50,
+        "step": "Translating extracted text",
+        "message": "Translating document text...",
+    },
+    "reconstructing": {
+        "percent": 70,
+        "step": "Reconstructing translated PDF",
+        "message": "Reconstructing translated PDF...",
+    },
+    "preview_generation": {
+        "percent": 85,
+        "step": "Creating document previews",
+        "message": "Creating document previews...",
+    },
+    "bilingual_output": {
+        "percent": 95,
+        "step": "Preparing bilingual output",
+        "message": "Preparing bilingual output...",
+    },
+    "completed": {
+        "percent": 100,
+        "step": "Completed",
+        "message": "Translation complete.",
+    },
+}
+
+
 class JobStatus:
     """Tracks the status of a translation job"""
     
@@ -28,6 +77,9 @@ class JobStatus:
         self.job_id = job_id
         self.status = "queued"  # queued, processing, completed, failed
         self.progress = 0
+        self.current_phase = "queued"
+        self.current_step = PIPELINE_PHASES["queued"]["step"]
+        self.phase_message = PIPELINE_PHASES["queued"]["message"]
         self.error = None
         self.detection_type = None
         self.file_type = None
@@ -62,6 +114,18 @@ class PipelineService:
         from ocr_stage.services.ocr_service import run_ocr
 
         return run_ocr(input_file_path)
+
+    @staticmethod
+    def _set_job_phase(job: JobStatus, phase: str) -> None:
+        phase_info = PIPELINE_PHASES.get(phase, PIPELINE_PHASES["queued"])
+        job.current_phase = phase
+        job.current_step = phase_info["step"]
+        job.phase_message = phase_info["message"]
+        job.progress = int(phase_info["percent"])
+        job.metadata["current_phase"] = job.current_phase
+        job.metadata["current_step"] = job.current_step
+        job.metadata["phase_message"] = job.phase_message
+        job.metadata["progress_percent"] = job.progress
     
     async def process_translation(
         self,
@@ -92,12 +156,12 @@ class PipelineService:
         
         try:
             job.status = "processing"
+            self._set_job_phase(job, "detecting")
 
             print(f"[Pipeline] Job {job_id} started")
 
             # Phase 1: Detect file type (digital vs scanned)
             print(f"[Pipeline] Phase 1: Detecting file type for {job_id}")
-            job.progress = 10
             
             if file_type == FileType.PDF:
                 job.detection_type = self.detection_service.detect_pdf_type(input_file_path)
@@ -110,7 +174,7 @@ class PipelineService:
             
             # Phase 2: Extract text and layout
             print(f"[Pipeline] Phase 2: Extracting text and layout")
-            job.progress = 25
+            self._set_job_phase(job, "extracting")
             
             layout_data = []
             
@@ -127,6 +191,7 @@ class PipelineService:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
             else:
                 # Scanned input: route through Tesseract OCR. No mock fallback.
+                self._set_job_phase(job, "ocr")
                 try:
                     if file_type == FileType.PDF:
                         print(f"[Pipeline] SCANNED PDF - running Tesseract OCR")
@@ -225,7 +290,7 @@ class PipelineService:
 
             # Phase 3: Translate text
             print(f"[Pipeline] Phase 3: Translating text ({source_language} -> {target_language})")
-            job.progress = 50
+            self._set_job_phase(job, "translating")
 
             translation_warnings: List[str] = []
             translations = self._translate_layout(
@@ -249,10 +314,10 @@ class PipelineService:
                 translations,
             )
             self._attach_translations_to_structure(job_id, translations)
-            
+
             # Phase 4: Reconstruct document
             print(f"[Pipeline] Phase 4: Reconstructing document")
-            job.progress = 75
+            self._set_job_phase(job, "reconstructing")
             
             output_pdf_path = self.file_service.get_output_path(job_id, "translated.pdf")
             layout_warnings: List[str] = []
@@ -291,7 +356,7 @@ class PipelineService:
 
             # Phase 5: Create bilingual preview
             print(f"[Pipeline] Phase 5: Creating preview")
-            job.progress = 85
+            self._set_job_phase(job, "preview_generation")
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
             # Cap at 20 pages to keep preview generation bounded for large PDFs.
@@ -306,10 +371,10 @@ class PipelineService:
             
             job.metadata["preview_original"] = original_previews
             job.metadata["preview_translated"] = translated_previews
-            
+
             # Phase 6: Create bilingual PDF
             print(f"[Pipeline] Phase 6: Creating bilingual PDF")
-            job.progress = 95
+            self._set_job_phase(job, "bilingual_output")
             
             bilingual_path = self.file_service.get_output_path(job_id, "bilingual.pdf")
             if file_type == FileType.PDF:
@@ -321,7 +386,7 @@ class PipelineService:
                 job.metadata["bilingual_pdf"] = bilingual_path
             
             job.status = "completed"
-            job.progress = 100
+            self._set_job_phase(job, "completed")
             job.completed_at = datetime.now()
             
             print(f"[Pipeline] Job {job_id} completed successfully")
@@ -330,6 +395,11 @@ class PipelineService:
         except Exception as e:
             job.status = "failed"
             job.error = str(e)
+            job.phase_message = str(e)
+            job.current_step = "Translation failed"
+            job.metadata["phase_message"] = job.phase_message
+            job.metadata["current_step"] = job.current_step
+            job.metadata["progress_percent"] = job.progress
             print(f"[Pipeline] Job {job_id} failed: {e}")
             return False
     

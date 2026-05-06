@@ -51,6 +51,10 @@ class TranslateResponse(BaseModel):
     job_id: str
     status: str  # "processing", "completed", "failed"
     message: Optional[str] = None
+    progress_percent: Optional[int] = None
+    current_phase: Optional[str] = None
+    current_step: Optional[str] = None
+    phase_message: Optional[str] = None
 
 
 class JobStatus(BaseModel):
@@ -60,6 +64,9 @@ class JobStatus(BaseModel):
     detection_type: Optional[DetectionType] = None
     file_type: Optional[FileType] = None
     progress_percent: int = 0
+    current_phase: Optional[str] = None
+    current_step: Optional[str] = None
+    phase_message: Optional[str] = None
     error: Optional[str] = None
 
 

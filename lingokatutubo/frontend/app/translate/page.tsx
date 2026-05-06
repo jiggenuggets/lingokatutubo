@@ -24,6 +24,33 @@ const TARGET_LANGUAGES = [
   { value: 'cebuano',  label: 'Cebuano' },
 ];
 
+interface JobProgressStatus {
+  job_id: string;
+  status: string;
+  message?: string;
+  progress?: number;
+  progress_percent?: number;
+  current_phase?: string;
+  current_step?: string;
+  phase_message?: string;
+  error?: string;
+  detected_language?: string;
+  detection_confidence?: number;
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  queued: 'Queued for processing',
+  uploaded: 'Queued for processing',
+  detecting: 'Detecting document type',
+  extracting: 'Extracting text and layout',
+  ocr: 'Running OCR for scanned document',
+  translating: 'Translating text',
+  reconstructing: 'Reconstructing translated PDF',
+  preview_generation: 'Creating document previews',
+  bilingual_output: 'Preparing bilingual output',
+  completed: 'Completed',
+};
+
 export default function TranslatePage() {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -36,6 +63,7 @@ export default function TranslatePage() {
   const [detectionConfidence, setDetectionConfidence] = useState<number | null>(null);
   const [isDetectingLanguage, setIsDetectingLanguage] = useState(false);
   const [isJobComplete, setIsJobComplete] = useState(false);
+  const [jobProgress, setJobProgress] = useState<JobProgressStatus | null>(null);
   const detectStartRef = useRef<number>(0);
   const detectionShownRef = useRef<boolean>(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -138,6 +166,14 @@ export default function TranslatePage() {
     setDetectionConfidence(null);
     setIsDetectingLanguage(false);
     setIsJobComplete(false);
+    setJobProgress({
+      job_id: '',
+      status: 'processing',
+      progress_percent: 0,
+      current_phase: 'queued',
+      current_step: 'Queued for processing',
+      phase_message: 'Document is waiting to be processed.',
+    });
     detectionShownRef.current = false;
 
     const response = await upload(selectedFile, sourceLanguage, targetLanguage);
@@ -147,12 +183,21 @@ export default function TranslatePage() {
       setUploadStatus('success');
       setIsDetectingLanguage(true);
       detectStartRef.current = Date.now();
+      setJobProgress({
+        job_id: response.job_id,
+        status: response.status,
+        progress_percent: response.progress_percent ?? 0,
+        current_phase: response.current_phase ?? 'queued',
+        current_step: response.current_step ?? 'Queued for processing',
+        phase_message: response.phase_message ?? response.message,
+      });
 
       // Poll for status to get detected language and completion
       pollStatus(response.job_id);
     } else {
       setUploadStatus('error');
       setErrorMessage(uploadError || 'Translation failed. Please try again.');
+      setJobProgress(null);
     }
   };
 
@@ -195,15 +240,17 @@ export default function TranslatePage() {
         }
 
         consecutiveNetworkErrors = 0;
-        const data = await res.json();
+        const data: JobProgressStatus = await res.json();
+        setJobProgress(data);
 
-        if (data.detected_language && !detectionShownRef.current) {
+        const detectedLanguageValue = data.detected_language;
+        if (detectedLanguageValue && !detectionShownRef.current) {
           detectionShownRef.current = true;
           const elapsed = Date.now() - detectStartRef.current;
           const delay = Math.max(0, 1500 - elapsed);
           detectionTimerRef.current = setTimeout(() => {
             if (!isMountedRef.current) return;
-            setDetectedLanguage(formatLanguageName(data.detected_language));
+            setDetectedLanguage(formatLanguageName(detectedLanguageValue));
             setDetectionConfidence(data.detection_confidence ?? null);
             setIsDetectingLanguage(false);
           }, delay);
@@ -213,12 +260,20 @@ export default function TranslatePage() {
           clearPolling();
           setIsDetectingLanguage(false);
           setIsJobComplete(true);
+          setJobProgress({
+            ...data,
+            progress_percent: 100,
+            current_phase: data.current_phase ?? 'completed',
+            current_step: data.current_step ?? 'Completed',
+            phase_message: data.phase_message ?? 'Translation complete.',
+          });
           return;
         }
 
         if (data.status === 'failed') {
           clearPolling();
           setIsDetectingLanguage(false);
+          setJobProgress(data);
           setErrorMessage(data.error || data.message || 'Translation failed. Please try again.');
           return;
         }
@@ -298,11 +353,30 @@ export default function TranslatePage() {
     setDetectionConfidence(null);
     setIsDetectingLanguage(false);
     setIsJobComplete(false);
+    setJobProgress(null);
     detectionShownRef.current = false;
   };
 
   const langLabel = (val: string) =>
     TARGET_LANGUAGES.find((l) => l.value === val)?.label ?? val;
+
+  const progressPercent =
+    typeof jobProgress?.progress_percent === 'number'
+      ? Math.max(0, Math.min(100, Math.round(jobProgress.progress_percent)))
+      : typeof jobProgress?.progress === 'number'
+      ? Math.max(0, Math.min(100, Math.round(jobProgress.progress)))
+      : null;
+  const progressPhase = jobProgress?.current_phase ?? '';
+  const progressStep =
+    jobProgress?.current_step ||
+    PHASE_LABELS[progressPhase] ||
+    (isJobComplete ? 'Completed' : 'Processing document');
+  const progressMessage =
+    jobProgress?.phase_message ||
+    jobProgress?.message ||
+    PHASE_LABELS[progressPhase] ||
+    'Processing document...';
+  const showProgressCard = !!uploadId && !!jobProgress && !errorMessage;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background via-white to-background">
@@ -408,6 +482,53 @@ export default function TranslatePage() {
                     )}
                   </p>
                 )}
+              </div>
+            )}
+
+            {/* Progress */}
+            {showProgressCard && (
+              <div className="mt-4 p-5 bg-white border-2 border-primary/20 rounded-lg shadow-sm">
+                <div className="flex items-start justify-between gap-4 mb-3">
+                  <div>
+                    <p className="text-base font-bold text-primary">
+                      Processing document
+                      {progressPercent != null ? `... ${progressPercent}%` : '...'}
+                    </p>
+                    <p className="text-sm text-foreground/70 mt-1">
+                      {progressMessage}
+                    </p>
+                  </div>
+                  {progressPercent == null && (
+                    <span className="inline-block w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
+                  )}
+                </div>
+
+                {progressPercent != null ? (
+                  <div
+                    className="h-3 w-full rounded-full bg-primary/10 overflow-hidden"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progressPercent}
+                    aria-label="Translation progress"
+                  >
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary to-secondary transition-all duration-500"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-3 w-full rounded-full bg-primary/10 overflow-hidden">
+                    <div className="h-full w-1/3 rounded-full bg-gradient-to-r from-primary to-secondary animate-pulse" />
+                  </div>
+                )}
+
+                <p className="text-sm text-foreground/80 mt-3">
+                  <span className="font-semibold">Current step:</span> {progressStep}
+                </p>
+                <p className="text-xs text-foreground/60 mt-2 leading-relaxed">
+                  Large scanned PDFs may take longer because OCR and preview generation are being processed.
+                </p>
               </div>
             )}
           </div>

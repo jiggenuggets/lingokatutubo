@@ -761,6 +761,22 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
             main_module.pipeline_service = original_pipeline_service
             main_module.file_service = original_file_service
 
+    def status_json(self, service: PipelineService, job_id: str) -> dict:
+        import main as main_module
+
+        original_pipeline_service = main_module.pipeline_service
+        original_file_service = main_module.file_service
+        main_module.pipeline_service = service
+        main_module.file_service = service.file_service
+        try:
+            client = TestClient(main_module.app)
+            response = client.get(f"/status/{job_id}")
+            self.assertEqual(response.status_code, 200)
+            return response.json()
+        finally:
+            main_module.pipeline_service = original_pipeline_service
+            main_module.file_service = original_file_service
+
     def preview_image_response(self, service: PipelineService, job_id: str, image_name: str):
         import main as main_module
 
@@ -822,6 +838,49 @@ class PipelineLayoutRegressionTests(unittest.TestCase):
         self.assertNotIn("image", self.block_types(structure))
         self.assert_output_page_size(service, job_id, 320, 220)
         self.assertTrue(any("too long for its bbox" in warning for warning in structure["warnings"]))
+
+    def test_status_endpoint_returns_completed_progress_metadata(self):
+        service = self.make_pipeline_service()
+        pdf_path = self.tmp_path / "status-completed.pdf"
+        self.write_text_pdf(pdf_path)
+
+        job_id = self.run_pipeline(service, pdf_path, FileType.PDF)
+        status = self.status_json(service, job_id)
+
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["progress_percent"], 100)
+        self.assertEqual(status["current_phase"], "completed")
+        self.assertEqual(status["current_step"], "Completed")
+        self.assertEqual(status["phase_message"], "Translation complete.")
+        self.assertIn("progress", status)
+
+    def test_status_endpoint_returns_failed_progress_metadata(self):
+        service = self.make_pipeline_service(ocr_service=BlankOCR())
+        pdf_path = self.tmp_path / "status-failed.pdf"
+        doc = fitz.open()
+        doc.new_page(width=300, height=180)
+        doc.save(pdf_path)
+        doc.close()
+
+        job_id = f"failed-{uuid.uuid4().hex[:8]}"
+        ok = asyncio.run(
+            service.process_translation(
+                job_id=job_id,
+                input_file_path=str(pdf_path),
+                file_type=FileType.PDF,
+                source_language="english",
+                target_language="tagabawa",
+            )
+        )
+
+        self.assertFalse(ok)
+        status = self.status_json(service, job_id)
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["progress_percent"], 25)
+        self.assertEqual(status["current_phase"], "ocr")
+        self.assertEqual(status["current_step"], "Translation failed")
+        self.assertIn("OCR produced no text", status["error"])
+        self.assertIn("OCR produced no text", status["phase_message"])
 
     def test_pipeline_digital_pdf_with_image_fixture(self):
         service = self.make_pipeline_service()
