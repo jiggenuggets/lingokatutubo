@@ -285,11 +285,14 @@ class PipelineService:
             job.progress = 85
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
+            # Cap at 20 pages to keep preview generation bounded for large PDFs.
+            # The /preview endpoint reports every generated page, so the
+            # frontend viewer can paginate up to this limit.
             original_previews = self.reconstruction_service.create_preview_images(
-                input_file_path, preview_dir, max_pages=2, prefix="original"
+                input_file_path, preview_dir, max_pages=20, prefix="original"
             )
             translated_previews = self.reconstruction_service.create_preview_images(
-                output_pdf_path, preview_dir, max_pages=2, prefix="translated"
+                output_pdf_path, preview_dir, max_pages=20, prefix="translated"
             )
             
             job.metadata["preview_original"] = original_previews
@@ -866,13 +869,6 @@ class PipelineService:
                                 )
                             continue
 
-                        page.draw_rect(
-                            rect,
-                            color=(1, 1, 1),
-                            fill=(1, 1, 1),
-                            width=0,
-                            overlay=True,
-                        )
                         self.reconstruction_service._insert_text_in_rect(
                             page,
                             rect,
