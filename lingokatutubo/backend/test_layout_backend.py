@@ -311,6 +311,43 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn("wayig", extracted)
         self.assertTrue(any("too light" in warning for warning in warnings))
 
+    def test_reconstruction_marks_missing_translation_for_review(self):
+        input_pdf = self.tmp_path / "input.pdf"
+        output_pdf = self.tmp_path / "translated-missing.pdf"
+        self._write_base_pdf(input_pdf)
+
+        layout_data = [{
+            "page": 0,
+            "width": 320,
+            "height": 220,
+            "blocks": [{
+                "type": "text",
+                "bbox": [40, 58, 180, 76],
+                "lines": [{
+                    "text": "Hello",
+                    "bbox": [40, 58, 180, 76],
+                    "font": "Helvetica",
+                    "size": 12,
+                    "color": [0, 0, 0],
+                }],
+            }],
+        }]
+
+        ok = ReconstructionService.reconstruct_pdf(
+            str(input_pdf),
+            layout_data,
+            {},
+            str(output_pdf),
+            layout_warnings=[],
+        )
+
+        self.assertTrue(ok)
+        out_doc = fitz.open(output_pdf)
+        extracted = out_doc[0].get_text()
+        out_doc.close()
+
+        self.assertIn("[UNKNOWN_FOR_REVIEW]", extracted)
+
     def test_preview_prefixes_prevent_original_translated_overwrite(self):
         input_pdf = self.tmp_path / "input.pdf"
         output_pdf = self.tmp_path / "translated.pdf"

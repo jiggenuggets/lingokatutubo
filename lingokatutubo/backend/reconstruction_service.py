@@ -20,15 +20,20 @@ class ReconstructionService:
         if warnings is not None and message and message not in warnings:
             warnings.append(message)
 
-    @staticmethod
-    def _coerce_translation_value(value: Any, fallback: str) -> str:
+    @classmethod
+    def _coerce_translation_value(cls, value: Any, fallback: str) -> str:
         """Support both legacy string translations and dict translation records."""
         if value is None:
-            return fallback
+            return cls.FALLBACK_REVIEW_TEXT
         if isinstance(value, dict):
             translated = value.get("translated")
-            if translated is None:
-                return fallback
+            if translated is None or not str(translated).strip():
+                return cls.FALLBACK_REVIEW_TEXT
+            if (
+                str(translated).strip() == fallback.strip()
+                and str(value.get("method") or "").lower() == "untranslated"
+            ):
+                return cls.FALLBACK_REVIEW_TEXT
             return str(translated)
         return str(value)
 
@@ -44,7 +49,7 @@ class ReconstructionService:
         for key in candidate_keys:
             if key and key in translations:
                 return cls._coerce_translation_value(translations.get(key), original_text)
-        return original_text
+        return cls.FALLBACK_REVIEW_TEXT
 
     @staticmethod
     def _rect_from_bbox(
@@ -499,6 +504,42 @@ class ReconstructionService:
                 )
 
         return False
+
+    @classmethod
+    def _restore_original_text(
+        cls,
+        page: fitz.Page,
+        rect: fitz.Rect,
+        original_text: str,
+        line: Dict[str, Any],
+        warnings: Optional[List[str]],
+        page_number: int,
+        block_number: int,
+        line_number: int,
+    ) -> bool:
+        if not original_text.strip():
+            return False
+
+        restore_line = dict(line)
+        restore_line["color"] = [0, 0, 0]
+        restored = cls._insert_text_in_rect(
+            page,
+            rect,
+            original_text,
+            restore_line,
+            warnings,
+            page_number,
+            block_number,
+            line_number,
+            fallback_text=cls.FALLBACK_REVIEW_TEXT,
+        )
+        if restored:
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                "translated insertion failed; original text was preserved visibly.",
+            )
+        return restored
     
     @staticmethod
     def reconstruct_pdf(
@@ -604,10 +645,24 @@ class ReconstructionService:
                                 fallback_text=original_text or ReconstructionService.FALLBACK_REVIEW_TEXT,
                             )
                             if not inserted:
+                                restored = ReconstructionService._restore_original_text(
+                                    page,
+                                    rect,
+                                    original_text,
+                                    line,
+                                    layout_warnings,
+                                    page_num + 1,
+                                    block_idx,
+                                    line_idx,
+                                )
                                 ReconstructionService._append_warning(
                                     layout_warnings,
                                     f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
-                                    "white mask was drawn but no replacement text could be inserted.",
+                                    + (
+                                        "white mask was drawn but no replacement text could be inserted."
+                                        if not restored
+                                        else "translated text could not be inserted; original text was restored."
+                                    ),
                                 )
                         except Exception as e:
                             print(f"[Reconstruction] Error inserting text: {e}")
