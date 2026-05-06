@@ -1,8 +1,8 @@
 # LingoKatutubo - Implementation Guide
 ## Layout-Preserving PDF Translation System
 
-**Version:** 1.1  
-**Last reviewed:** 2026-05-05
+**Version:** 1.2  
+**Last reviewed:** 2026-05-07
 **Status:** Reference / forward-looking. Most code samples below are **Planned** and not yet present in the repo. See [README.md](../README.md) for the live status table.
 
 > ⚠️ **How to read this file.** This is a target-state implementation reference. The Python and TypeScript snippets here are **design samples**, not the current code. Where the current code differs, follow the reality notes inline.
@@ -13,52 +13,54 @@
 
 ✅ **Implemented**
 - Frontend upload UI ([frontend/app/translate/page.tsx](frontend/app/translate/page.tsx))
-- FastAPI backend with `/translate`, `/status`, `/structure`, `/preview`, `/download`, `/quick-translate`, `/health`, `/preview-image` ([backend/main.py](backend/main.py))
-- Translation dataset loader with exact + fuzzy (rapidfuzz) + word-by-word fallback ([backend/translation_dataset.py](backend/translation_dataset.py))
-- File upload + job directory + in-memory job tracking
-- Digital PDF text + bbox extraction (PyMuPDF), DOCX paragraph extraction
+- Frontend dedicated bilingual viewer route ([frontend/app/translate/preview/[jobId]/page.tsx](frontend/app/translate/preview/[jobId]/page.tsx)) with Back, Download, Original/Translated images, Page X of N, Previous/Next, and a collapsible Translation Details section
+- Frontend inline progress card (phase, percent, current step, message) driven by `PIPELINE_PHASES`
+- FastAPI backend with `/translate`, `/status`, `/jobs/{id}`, `/structure`, `/preview`, `/download`, `/quick-translate`, `/health`, `/preview-image` ([backend/main.py](backend/main.py)). Note: `/quick-translate` takes its arguments as **query parameters**, not a JSON body.
+- Translation dataset loader with exact + normalized + fuzzy (rapidfuzz, threshold 82) + word-by-word fallback ([backend/translation_dataset.py](backend/translation_dataset.py))
+- File upload + job directory + in-memory job tracking; jobs are pre-registered before background work starts and the pipeline coroutine runs in a worker thread via `asyncio.to_thread`
+- Digital PDF text + bbox extraction (PyMuPDF) including font name/size/color/flags, image-block metadata, drawings, and best-effort table candidates; DOCX paragraph extraction
 - Document-level language detection (langdetect + Tagabawa dictionary)
-- Translated PDF reconstruction (white-box overlay + 11pt insert_text)
-- Bilingual PDF (side-by-side combined)
-- PNG previews for first 2 pages; frontend consumes original preview and first-page bilingual blocks
-- Structured page/block JSON endpoint at `/structure/{job_id}`
-- Tesseract/pytesseract OCR path for scanned PDFs/images
+- Layout-aware translated PDF reconstruction: style-aware fontname inference (regular/bold/italic/mono/serif), Unicode TTF fallback with style-matched variants for diacritics, readable minimum font size, shrink-then-ellipsis truncation, visible-color forcing over white masks, original-text or `[Needs review]` fallback when insertion fails, and a one-time font-substitution notice. **Exact embedded-font reuse is not guaranteed.**
+- Bilingual PDF (alternating original/translated pages)
+- PNG previews for up to 20 pages per document; frontend viewer paginates across them and shows a warning when the document is longer
+- Structured page/block JSON endpoint at `/structure/{job_id}` with per-line bbox, font/size/color, OCR confidence (scanned only), translated text, cascade method, and warnings
+- Tesseract/pytesseract OCR path for scanned PDFs/images, with grayscale + autocontrast + median denoise preprocessing, OSD-based 180° flip, per-line confidence, low-confidence page warning at threshold 0.55, and language-pack fallback to `eng`
 
 ⚠️ **Partially Implemented**
-- PDF reconstruction (no font/size/color adaptation, no shape preservation, no overflow handling)
-- Translation cascade (no `[UNKNOWN]` marker, no confidence surfaced to frontend)
-- Image-block extraction (detected but not redrawn during reconstruction)
-- Side-by-side translation preview (inline original page preview + first-page translated blocks only; no full viewer)
+- Image / line / shape preservation through reconstruction — translated text is overlaid on the original PDF page so most non-text objects survive, but the white mask under each text bbox can still cover decorative elements that overlap a text region
+- Translation cascade — block-level confidence and cascade method are emitted into `structure.json`, but the frontend currently surfaces only the user-facing translated text and a "Needs review" indicator; richer per-block confidence UI is not finished
+- Per-block language detection — today's detection runs over the document, not per block
+- DOCX layout — paragraph-level only; bboxes are synthetic
 
 ❌ **Planned — Not Yet Implemented (in priority order)**
 - **PaddleOCR for scanned documents** (Tesseract is wired; PaddleOCR is not)
-- **Full Side-by-Side Translation Preview** in the frontend (no `translation-viewer.tsx`)
-- **Document Translation Progress Modal** (no `translation-progress-modal.tsx`)
-- **Per-block language detection** (today's detection runs over the document, not per block)
+- **Multi-step Progress Modal component** — current implementation is the inline progress card on `/translate`; a separate modal is not required for the present flow
+- **Per-block language detection**
 - **Uncertainty flagging service** (no `uncertainty_service.py`)
 - **Pretrained model translation** (ByT5-small planned for Bagobo-Tagabawa directions, NLLB-200 distilled 600M planned for English/Cebuano/Tagalog directions) — no model is loaded or invoked at runtime; do not train from scratch
-- **Layout-preserving font/color/alignment, multi-line wrapping, image/shape redraw**
+- **Native digital-table preservation, multi-column reading-order recovery, image/shape redraw under text masks**
 
 ---
 
-## Current System Analysis (verified 2026-05-05)
+## Current System Analysis (verified 2026-05-07)
 
 ### Backend Architecture (Current State)
 
 ```
 backend/
-├── main.py                          # ✅ FastAPI app + CORS + endpoints
+├── main.py                          # ✅ FastAPI app + CORS + endpoints; pre-registers jobs and runs pipeline in worker thread
 ├── models.py                        # ✅ Pydantic models (FileType, JobStatus, etc.)
-├── file_service.py                  # ✅ File storage + job dir
-├── pipeline_service.py              # ⚠️  Async pipeline; SCANNED branch calls Tesseract OCR
-├── extraction_service.py            # ⚠️  Text/bbox/span metadata + best-effort tables/drawings
-├── reconstruction_service.py        # ⚠️  White-box + 11pt insert_text; no shape preservation
+├── file_service.py                  # ✅ File storage + job dir + retention cleanup
+├── pipeline_service.py              # ✅ Async pipeline; SCANNED branch calls Tesseract OCR; register_job/mark_job_failed
+├── extraction_service.py            # ✅ Text/bbox/span/font metadata + image blocks + drawings + table candidates
+├── reconstruction_service.py        # ✅ Layout-aware reconstruction (style-aware fonts, Unicode fallback, readable min size, ellipsis truncation, fallback text)
 ├── detection_service.py             # ✅ Digital vs scanned (text-layer probe)
-├── translation_dataset.py           # ✅ Exact + rapidfuzz fuzzy + word-by-word
+├── translation_dataset.py           # ✅ Exact + normalized + rapidfuzz fuzzy + word-by-word
 ├── language_detection_service.py    # ✅ langdetect + Tagabawa dictionary
-├── translation_data.json            # ✅ Phrase dataset
-├── export_training_jsonl.py          # ✅ JSONL data-prep utility only; does not train models
-├── ocr_stage/                       # ⚠️  Tesseract-backed OCR service
+├── translation_data.json            # ✅ Phrase dataset (1015 rows, 4 languages)
+├── export_training_jsonl.py         # ✅ JSONL data-prep utility only; does not train models
+├── ocr_stage/                       # ⚠️  Tesseract-backed OCR service (preprocess + OSD + confidence + warnings)
+├── OCR_LANGUAGE_PACKS.md            # ✅ OCR language pack mapping + low-confidence threshold
 └── requirements.txt                 # ⚠️  pytesseract listed; system Tesseract binary still required
 ```
 
@@ -67,18 +69,21 @@ backend/
 ```
 frontend/
 ├── app/
-│   ├── page.tsx                # ✅ Home
-│   ├── translate/page.tsx      # ⚠️  Upload + status polling + download + partial preview
-│   └── about/page.tsx          # ✅ About page
+│   ├── page.tsx                              # ✅ Home
+│   ├── translate/page.tsx                    # ✅ Upload + status polling + inline progress card + download + Preview Bilingual link
+│   ├── translate/preview/[jobId]/page.tsx    # ✅ Side-by-side bilingual viewer (Original/Translated, Page X of N, Previous/Next, Translation Details)
+│   └── about/page.tsx                        # ✅ About page
 ├── components/
-│   ├── navigation.tsx          # ✅ Navigation
-│   ├── theme-provider.tsx      # ✅
-│   └── ui/                     # shadcn primitives — most are unused
-└── hooks/use-upload.ts         # ✅ POST /translate
+│   ├── navigation.tsx                        # ✅ Navigation
+│   ├── theme-provider.tsx                    # ✅
+│   └── ui/                                   # shadcn primitives — most are unused
+└── hooks/use-upload.ts                       # ✅ POST /translate
 
-# ❌ Missing (Planned):
-#   components/translation-viewer.tsx
-#   components/translation-progress-modal.tsx
+# Notes:
+# • The viewer lives at the dedicated `/translate/preview/[jobId]` route
+#   instead of as a `translation-viewer.tsx` component. A separate
+#   `translation-progress-modal.tsx` is not required by the current flow —
+#   `app/translate/page.tsx` renders an inline progress card.
 ```
 
 ### Dataset and Model Preparation Reality
@@ -258,11 +263,11 @@ def translate_with_confidence(
 ```
 
 **Key Features to Add:**
-1. Fuzzy string matching with `fuzzywuzzy` or `rapidfuzz`
-2. Normalized text matching (lowercase, remove punctuation)
-3. Confidence scoring for each translation
-4. DuBois dictionary integration
-5. `[UNKNOWN]` and `[UNCERTAIN]` flags
+1. Fuzzy string matching with `rapidfuzz` *(Implemented)*
+2. Normalized text matching (lowercase, strip punctuation, optional diacritic-strip variant) *(Implemented)*
+3. Confidence scoring for each translation *(Partially Implemented — emitted into `structure.json` per block)*
+4. Surface block-level confidence in the frontend *(Planned)*
+5. `[UNKNOWN_FOR_REVIEW]` internal marker → "Needs review" user-facing label *(Implemented)*
 
 #### 1.3 Layout-Preserving PDF Reconstruction
 
@@ -441,7 +446,9 @@ def create_preview_images(
 
 #### 2.2 Frontend: Side-by-Side Viewer Component
 
-**New File:** `frontend/components/translation-viewer.tsx`
+> **Reality note:** the side-by-side viewer ships as a route, not a separate component. See [frontend/app/translate/preview/[jobId]/page.tsx](frontend/app/translate/preview/[jobId]/page.tsx). The TypeScript snippet below is a **design sample** kept for reference only; do not extract it into a new `translation-viewer.tsx` without first checking whether the route version already covers your case.
+
+**Design sample (not the current code):** `frontend/components/translation-viewer.tsx`
 
 ```typescript
 'use client';
@@ -603,7 +610,9 @@ export function TranslationViewer({ jobId, onClose }: TranslationViewerProps) {
 
 #### 2.3 Document Translation Progress Modal
 
-**New File:** `frontend/components/translation-progress-modal.tsx`
+> **Reality note:** the progress UI ships as an inline progress card on `/translate` (phase, percent, current step, message), driven by `PIPELINE_PHASES`. A separate modal is not required for the present flow; the snippet below is a **design sample** kept for reference only.
+
+**Design sample (not the current code):** `frontend/components/translation-progress-modal.tsx`
 
 ```typescript
 'use client';

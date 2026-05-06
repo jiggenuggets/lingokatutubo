@@ -5,25 +5,26 @@
 **Goal:** Build a layout-aware document translation system for Bagobo-Tagabawa educational materials.  
 **Approach:** Build document processing first, then connect translation datasets later.
 
-> **This is a roadmap, not a status report.** Each phase below is annotated with the labels **Implemented**, **Partially Implemented**, or **Planned** to reflect what exists in code today (2026-05-05). For the live status summary see [README.md](../README.md). For the running system see [RUNNING_GUIDE.md](RUNNING_GUIDE.md).
+> **This is a roadmap, not a status report.** Each phase below is annotated with the labels **Implemented**, **Partially Implemented**, or **Planned** to reflect what exists in code today (2026-05-07). For the live status summary see [README.md](../README.md). For the running system see [RUNNING_GUIDE.md](RUNNING_GUIDE.md).
 
 ### Snapshot of plan status
 
 | Phase | Topic | Status |
 |-------|-------|--------|
 | 1 | Project Foundation (frontend + backend skeleton) | **Implemented** |
-| 2 | File Intake / Job Pipeline | **Implemented** (in-memory job store; no `job_store.py` module) |
+| 2 | File Intake / Job Pipeline | **Implemented** (in-memory job store; jobs are pre-registered before background work, pipeline runs in a worker thread via `asyncio.to_thread`; no `job_store.py` module) |
 | 3 | PDF Type Detection | **Implemented** (text-layer probe; no pdfplumber) |
-| 4 | Digital PDF Extraction | **Partially Implemented** (text + bbox + font name/size/color and best-effort tables/drawings; no alignment/reconstruction fidelity) |
-| 5 | Scanned PDF OCR | **Partially Implemented** (Tesseract/pytesseract wired; PaddleOCR not wired) |
-| 6 | Layout-Aware Reconstruction | **Partially Implemented** (white-box overlay + 11pt insert_text; no font/size adaptation, no shape preservation) |
-| 7 | Preview Generation | **Implemented** (first 2 pages; frontend consumes original preview and first-page bilingual blocks) |
-| 8 | Tables | **Planned** |
-| 9 | Translation Dataset Integration | **Implemented** (phrasebook / translation memory; exact → fuzzy → word-by-word; not enough for high-accuracy neural translation) |
-| 10 | Language Detection | **Implemented** (langdetect + Tagabawa dictionary) |
+| 4 | Digital PDF Extraction | **Implemented** (text + bbox + font name/size/color/flags + image-block metadata + drawings + best-effort table candidates) |
+| 5 | Scanned PDF OCR | **Partially Implemented** (Tesseract/pytesseract wired with preprocessing, OSD 180° flip, per-line confidence, low-confidence warning at threshold 0.55, language-pack fallback to `eng`; PaddleOCR not wired) |
+| 6 | Layout-Aware Reconstruction | **Implemented** (style-aware fontname inference, Unicode TTF fallback with style-matched variants for diacritics, readable minimum font size, ellipsis truncation, visible-color forcing, original-text/`[Needs review]` fallback, font-substitution notice). Exact embedded-font reuse is **not** guaranteed. Image/shape redraw under text masks is still partial. |
+| 7 | Preview Generation | **Implemented** (up to 20 pages per document; frontend viewer paginates with Previous/Next and shows a > 20-page warning) |
+| 8 | Tables | **Planned** (best-effort table candidates are emitted in `structure.json`, but layout-faithful table reconstruction is not built) |
+| 9 | Translation Dataset Integration | **Implemented** (phrasebook / translation memory; exact → normalized → fuzzy → word-by-word; not enough for high-accuracy neural translation) |
+| 10 | Language Detection | **Implemented** at the document level (langdetect + Tagabawa dictionary). **Per-block** detection is still **Planned**. |
 | 11 | Frontend Build Order — upload UI | **Implemented** |
-| 11 | Frontend Build Order — progress modal | **Planned** (currently just an inline spinner) |
-| 11 | Frontend Build Order — side-by-side viewer | **Partially Implemented** (inline original preview + first-page translated blocks; no full viewer component) |
+| 11 | Frontend Build Order — progress UI | **Implemented** (inline progress card with phase, percent, current step, message; backed by `PIPELINE_PHASES`. A separate modal component is not required by the current flow.) |
+| 11 | Frontend Build Order — side-by-side viewer | **Implemented** at the dedicated route `/translate/preview/[jobId]` with Back, Download, Original/Translated images, Page X of N, Previous/Next, and a collapsible Translation Details section. |
+| 12 | Pretrained-model translation (ByT5 / NLLB) | **Planned** — data prep (JSONL train/dev/test) is done; no model is loaded or invoked at runtime; do not train from scratch. See [DATASET_MODEL_PREP.md](DATASET_MODEL_PREP.md). |
 
 ---
 
@@ -184,9 +185,9 @@ OCR path should be treated as a lower-fidelity path than digital PDFs.
 
 ---
 
-## 6. Phase 6 — Layout-Aware Reconstruction  *(Partially Implemented)*
+## 6. Phase 6 — Layout-Aware Reconstruction  *(Implemented, with documented limits)*
 
-> **Reality check:** [reconstruction_service.py](backend/reconstruction_service.py) opens the original PDF, paints a white rectangle over each text block bbox, and inserts translated text at the original line bbox using **a hardcoded 11pt font and PyMuPDF's default font** with `color=(0,0,0)`. There is **no copy of images, lines, or shapes**, **no font matching**, **no font-size adaptation**, and **no overflow handling**. The white overlay can erase decorative elements that overlap text bboxes. A bilingual side-by-side PDF (`bilingual.pdf`) is also produced.
+> **Reality check:** [reconstruction_service.py](backend/reconstruction_service.py) opens the original PDF, paints a small white mask over each text bbox, and inserts translated text at the original line bbox. The inserter is **style-aware**: it picks a regular/bold/italic/mono/serif fontname from the source span, falls back to a style-matched Unicode TTF (`arialbd.ttf`, `arialbi.ttf`, etc.) when the translation contains diacritics, enforces a readable minimum font size, shrinks then ellipsizes overflowing text, forces a visible color over the white mask, and falls back to the original line or `[Needs review]` if insertion still fails. A one-time font-substitution notice is recorded in `structure.json`. **Exact embedded-font reuse is not guaranteed.** Decorative elements that overlap a text bbox can still be covered by the white mask. A bilingual side-by-side PDF (`bilingual.pdf`) is also produced.
 
 Do this before translation dataset integration.
 
@@ -195,15 +196,15 @@ Do this before translation dataset integration.
 
 ### Rebuild rules
 - Create output PDF page with same size  *(Implemented — opens original doc)*
-- Copy images to same location  *(Planned)*
-- Copy lines/shapes to same location  *(Planned)*
+- Copy images to same location  *(Implemented for non-text objects outside text bboxes; mask can still cover items inside a text bbox)*
+- Copy lines/shapes to same location  *(Partially Implemented — same caveat as images)*
 - Place translated or original text back into same text boxes  *(Implemented — line-bbox level)*
-- Preserve font size where possible  *(Planned)*
-- Shrink font only if needed  *(Planned)*
-- Wrap text carefully  *(Planned)*
+- Preserve font size where possible  *(Implemented — original size honored when it fits, with a readable minimum floor)*
+- Shrink font only if needed  *(Implemented — shrink-then-ellipsis)*
+- Wrap text carefully  *(Implemented — paragraph + per-word + per-char wrapping)*
 
 ### Important limitation
-Do not claim exact perfect layout preservation yet.
+Do not claim exact perfect layout preservation yet. Exact embedded-font reuse is not guaranteed; the closest available built-in font is used and a substitution warning is recorded.
 
 ### Output of this phase
 - Rebuilt PDF
@@ -211,25 +212,24 @@ Do not claim exact perfect layout preservation yet.
 
 ---
 
-## 7. Phase 7 — Preview Generation
+## 7. Phase 7 — Preview Generation  *(Implemented)*
 
 Needed for user trust and debugging.
 
 ### Module
-- `preview_service.py`
+- `reconstruction_service.create_preview_images` (no separate `preview_service.py`)
 
 ### Preview tasks
-- Convert original PDF pages to PNG
-- Convert translated/output PDF pages to PNG
-- Store preview files
-- Serve to frontend
+- Convert original PDF pages to PNG  *(Implemented — up to 20 pages, prefix `original_page_*.png`)*
+- Convert translated PDF pages to PNG  *(Implemented — prefix `translated_page_*.png`)*
+- Store preview files under `jobs/{job_id}/preview/`
+- Serve through `GET /preview-image/{job_id}/{name}` with regex-restricted filenames
 
 ### Recommended tools
-- PyMuPDF
-- pdf2image if needed
+- PyMuPDF (already in use)
 
 ### Output of this phase
-- Side-by-side preview working
+- Side-by-side preview is rendered by `/translate/preview/[jobId]` with Page X of N navigation. Documents longer than 20 pages display a banner directing the user to download the full translated PDF for the remaining pages.
 
 ---
 

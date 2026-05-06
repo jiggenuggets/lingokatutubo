@@ -71,7 +71,7 @@ Frontend URL: **http://localhost:3000**
 | GET | /download/{job_id} | Implemented | Returns `translated.pdf` (verifies the file exists first) |
 | POST | /quick-translate | Implemented | Translate a single phrase via the dataset cascade |
 
-> The frontend currently consumes `/preview/{job_id}` for the original page preview and `/structure/{job_id}` for first-page translated block data. Full multi-page viewing is still planned.
+> The frontend consumes `/preview/{job_id}` and `/structure/{job_id}` from a dedicated bilingual viewer route at **`/translate/preview/{jobId}`**. The viewer paginates Original vs Translated images side-by-side with Previous/Next, and surfaces a collapsible Translation Details section. Up to 20 preview pages are generated per document; for longer documents, use Download for the full translated PDF.
 
 ---
 
@@ -146,10 +146,11 @@ paths only; the running backend does not load or invoke either model.
 lingokatutubo/
 ├── frontend/                          ← Next.js 15 (React 19, Tailwind v4)
 │   ├── app/
-│   │   ├── page.tsx                   ← Home page
-│   │   ├── translate/page.tsx         ← Upload + status polling + download
+│   │   ├── page.tsx                                ← Home page
+│   │   ├── translate/page.tsx                      ← Upload + status polling + inline progress card + download
+│   │   ├── translate/preview/[jobId]/page.tsx      ← Bilingual viewer (Original/Translated, Page X of N, Translation Details)
 │   │   └── about/page.tsx
-│   ├── components/navigation.tsx      ← (no side-by-side viewer yet — Planned)
+│   ├── components/navigation.tsx                   ← Navigation
 │   ├── hooks/use-upload.ts            ← POST /translate
 │   └── lib/utils.ts
 └── backend/                           ← FastAPI (Python 3.11)

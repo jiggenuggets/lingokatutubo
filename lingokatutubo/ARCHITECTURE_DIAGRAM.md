@@ -2,30 +2,30 @@
 
 > ⚠️ **This diagram is the target architecture.** Several boxes below describe components that are **Planned**, not yet implemented. Read the legend before trusting any box.
 
-## Implementation Legend (verified 2026-05-05)
+## Implementation Legend (verified 2026-05-07)
 
 | Component in diagram | Status |
 |---|---|
 | Frontend Upload UI | **Implemented** |
-| Frontend Progress Modal (multi-step) | **Planned** — current UI is just an inline spinner |
-| Frontend Side-by-Side Viewer | **Partially Implemented** - current translate page shows original page preview plus first-page translated blocks; no full `translation-viewer.tsx` |
-| Backend `POST /translate`, `GET /status`, `GET /structure`, `GET /preview`, `GET /download`, `GET /preview-image` | **Implemented** |
-| Pipeline Phase 1 — Detection | **Implemented** (text-layer probe) |
-| Pipeline Phase 2 — Extraction (DIGITAL) | **Partially Implemented** — text + bbox + font name only |
-| Pipeline Phase 2 — OCR Service (SCANNED) | **Partially Implemented** - Tesseract/pytesseract is wired for scanned PDFs/images; PaddleOCR is not wired |
-| Pipeline Phase 3 — Language Detection (block-level) | **Partially Implemented** — document-level only today |
-| Pipeline Phase 4 — Translation cascade (exact → normalized → fuzzy → dictionary → unknown) | **Partially Implemented** — exact + fuzzy + word-by-word; no `[UNKNOWN]` marker, no surfaced confidence |
+| Frontend Progress UI | **Implemented** — inline progress card with phase, percent, current step, message; backed by `PIPELINE_PHASES` (no separate modal component, by design) |
+| Frontend Side-by-Side Viewer | **Implemented** — dedicated route at `/translate/preview/[jobId]` with Back, Download, Original/Translated images, Page X of N, Previous/Next, and a collapsible Translation Details section |
+| Backend `POST /translate`, `GET /status`, `GET /structure`, `GET /preview`, `GET /download`, `GET /preview-image`, `POST /quick-translate`, `GET /health` | **Implemented** |
+| Pipeline Phase 1 — Detection | **Implemented** (text-layer probe over first 3 pages) |
+| Pipeline Phase 2 — Extraction (DIGITAL) | **Implemented** — page size, text blocks, line/span bboxes, font name/size/color/flags, image-block metadata, drawings, best-effort table candidates |
+| Pipeline Phase 2 — OCR Service (SCANNED) | **Partially Implemented** — Tesseract/pytesseract wired with grayscale + autocontrast + median denoise, OSD-based 180° flip, per-line confidence, low-confidence warning at threshold 0.55, language-pack fallback to `eng`; PaddleOCR is not wired |
+| Pipeline Phase 3 — Language Detection (block-level) | **Partially Implemented** — document-level only today (`langdetect` + Tagabawa dictionary) |
+| Pipeline Phase 4 — Translation cascade (exact → normalized → fuzzy → word-by-word) | **Partially Implemented** — exact + fuzzy (rapidfuzz, threshold 82) + word-by-word; the internal `[UNKNOWN_FOR_REVIEW]` marker is set in pipeline metadata, but block-level confidence is not yet surfaced to the frontend |
 | Pipeline Phase 4 — Uncertainty Service | **Planned** — no `uncertainty_service.py` |
-| Pipeline Phase 5 — Reconstruction (image/line/shape preservation) | **Planned** — current code only re-inserts text with white-box overlay |
-| Pipeline Phase 5 — Reconstruction (text reinsertion) | **Implemented** — at line bbox, hardcoded 11pt, default font |
-| Pipeline Phase 6 — Preview generation | **Implemented** (first 2 pages) |
+| Pipeline Phase 5 — Reconstruction (image/line/shape preservation) | **Partially Implemented** — translated text is overlaid on the original PDF page (so most non-text objects survive), but the white mask under each text bbox can still cover decorative elements that overlap a text region |
+| Pipeline Phase 5 — Reconstruction (text reinsertion) | **Implemented** — layout-aware: style-aware fontname inference (regular / bold / italic / mono / serif), Unicode TTF fallback with style-matched variants for diacritics, readable minimum font size (≈ 7.5pt floor → 5.5pt hard floor), shrink-then-ellipsis truncation, visible-color forcing over white masks, original-text or `[Needs review]` fallback when insertion fails, and a one-time font-substitution notice. **Exact embedded-font reuse is not guaranteed.** |
+| Pipeline Phase 6 — Preview generation | **Implemented** — up to 20 pages rendered as PNG via PyMuPDF |
 | Pipeline Phase 7 — Completion check (output exists) | **Implemented** |
-| Job queue (Celery/RQ) | **Planned** — currently `asyncio.create_task` |
+| Job queue (Celery/RQ) | **Planned** — currently the pipeline coroutine runs in a worker thread via `asyncio.to_thread` so the HTTP loop stays responsive |
 | Object storage (S3/GCS) | **Planned** — currently local filesystem under `tempfile.gettempdir()/bagobo-uploads/jobs/` |
-| Database for job tracking | **Planned** — currently in-memory dict |
+| Database for job tracking | **Planned** — currently in-memory dict; jobs are pre-registered before the background task starts so `/status` answers immediately |
 | Pretrained model translation (ByT5 / NLLB) | **Planned** — ByT5-small for Bagobo-Tagabawa directions; NLLB-200 distilled 600M for English/Cebuano/Tagalog; not invoked at runtime; do not train from scratch |
 
-The diagram below shows the **target** architecture. Boxes labelled with services that do not fully exist yet (Uncertainty Service, full Side-by-Side Viewer, Document Translation Progress Modal) are aspirational.
+The diagram below shows the **target** architecture. Boxes labelled with services that do not fully exist yet (Uncertainty Service, multi-step Progress Modal component, image/line/shape preservation under text masks) are aspirational. The Side-by-Side Viewer is now implemented as a dedicated route and is no longer a planned component.
 
 ---
 
@@ -102,7 +102,7 @@ The diagram below shows the **target** architecture. Boxes labelled with service
 │  └─────────────────────────────────────────────────────────────┘        │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │  Phase 3: Language Detection (40%)                          │        │
+│  │  Phase 3: Language Detection (during extraction)            │        │
 │  │  ┌────────────────────────────────────────────────┐         │        │
 │  │  │ Language Detection Service                     │         │        │
 │  │  │ • detect_block_language(text)                  │         │        │
@@ -113,25 +113,21 @@ The diagram below shows the **target** architecture. Boxes labelled with service
 │  └─────────────────────────────────────────────────────────────┘        │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │  Phase 4: Translation (50-65%)                              │        │
+│  │  Phase 4: Translation (50%)                                 │        │
 │  │  ┌────────────────────────────────────────────────┐         │        │
 │  │  │ Translation Dataset Service                    │         │        │
-│  │  │ Strategy Cascade:                              │         │        │
+│  │  │ Strategy Cascade (current code):               │         │        │
 │  │  │                                                │         │        │
-│  │  │ 1. Exact Match      ─→ confidence: 1.0         │         │        │
-│  │  │    phrase_index lookup                         │         │        │
-│  │  │                                                │         │        │
-│  │  │ 2. Normalized Match ─→ confidence: 0.95        │         │        │
-│  │  │    lowercase, strip punctuation                │         │        │
-│  │  │                                                │         │        │
-│  │  │ 3. Fuzzy Match      ─→ confidence: 0.7-0.9     │         │        │
-│  │  │    fuzzywuzzy similarity > 85%                 │         │        │
-│  │  │                                                │         │        │
-│  │  │ 4. Dictionary       ─→ confidence: 0.6         │         │        │
-│  │  │    DuBois dictionary word lookup               │         │        │
-│  │  │                                                │         │        │
-│  │  │ 5. Unknown Flag     ─→ confidence: 0.0         │         │        │
-│  │  │    [UNKNOWN: text]                             │         │        │
+│  │  │ 1. Exact Match           ─→ phrase_index hit   │         │        │
+│  │  │ 2. Normalized Match      ─→ lowercase / strip  │         │        │
+│  │  │    punctuation / strip diacritics variants     │         │        │
+│  │  │ 3. Fuzzy Match           ─→ rapidfuzz ≥ 82     │         │        │
+│  │  │ 4. Word-by-Word Fallback ─→ per-token lookup   │         │        │
+│  │  │ 5. Internal review marker                      │         │        │
+│  │  │    `[UNKNOWN_FOR_REVIEW]` is set in pipeline   │         │        │
+│  │  │    metadata when nothing in the cascade        │         │        │
+│  │  │    matches. The user-facing label rendered in  │         │        │
+│  │  │    the rebuilt PDF is "[Needs review]".        │         │        │
 │  │  └────────────────────────────────────────────────┘         │        │
 │  │                         +                                   │        │
 │  │  ┌────────────────────────────────────────────────┐         │        │
@@ -143,7 +139,7 @@ The diagram below shows the **target** architecture. Boxes labelled with service
 │  └─────────────────────────────────────────────────────────────┘        │
 │                                                                           │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │  Phase 5: PDF Reconstruction (75-85%)                       │        │
+│  │  Phase 5: PDF Reconstruction (70%)                          │        │
 │  │  ┌────────────────────────────────────────────────┐         │        │
 │  │  │ Reconstruction Service                         │         │        │
 │  │  │ • reconstruct_pdf_with_layout()                │         │        │
@@ -157,18 +153,29 @@ The diagram below shows the **target** architecture. Boxes labelled with service
 │  │  │   └────────────────────────────┘               │         │        │
 │  │  │                                                │         │        │
 │  │  │   Step 2: Insert Translated Text               │         │        │
-│  │  │   ┌────────────────────────────┐               │         │        │
-│  │  │   │ • Use original coordinates │               │         │        │
-│  │  │   │ • Preserve font family     │               │         │        │
-│  │  │   │ • Adjust size if needed    │               │         │        │
-│  │  │   │ • Keep color & alignment   │               │         │        │
-│  │  │   │ • Handle text wrapping     │               │         │        │
-│  │  │   └────────────────────────────┘               │         │        │
+│  │  │   ┌────────────────────────────────────┐       │         │        │
+│  │  │   │ • Use original coordinates         │       │         │        │
+│  │  │   │ • Style-aware fontname (regular /  │       │         │        │
+│  │  │   │   bold / italic / mono / serif)    │       │         │        │
+│  │  │   │ • Unicode TTF fallback for         │       │         │        │
+│  │  │   │   diacritics (style-matched)       │       │         │        │
+│  │  │   │ • Force visible color over white   │       │         │        │
+│  │  │   │   mask                             │       │         │        │
+│  │  │   │ • Wrap, then shrink toward         │       │         │        │
+│  │  │   │   readable min font, then ellipsis │       │         │        │
+│  │  │   │ • Restore original line or insert  │       │         │        │
+│  │  │   │   "[Needs review]" if unfittable   │       │         │        │
+│  │  │   └────────────────────────────────────┘       │         │        │
+│  │  │ Note: Exact embedded-font reuse is not         │         │        │
+│  │  │ guaranteed; closest available built-in font    │         │        │
+│  │  │ is used and a one-time substitution warning    │         │        │
+│  │  │ is recorded in `structure.json`.               │         │        │
 │  │  └────────────────────────────────────────────────┘         │        │
 │  └─────────────────────────────────────────────────────────────┘        │
 │                                                                           │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │  Phase 6: Preview Generation (85-95%)                       │        │
+│  │  Phase 6: Preview Generation (85%)                          │        │
+│  │  Phase 6b: Bilingual Output (95%)                           │        │
 │  │  ┌────────────────────────────────────────────────┐         │        │
 │  │  │ Reconstruction Service                         │         │        │
 │  │  │ • create_preview_images()                      │         │        │
@@ -282,7 +289,7 @@ The diagram below shows the **target** architecture. Boxes labelled with service
 └─────────────────────────────────────────────────────────────────────────┘
 
 
-## Translation Strategy Decision Tree
+## Translation Strategy Decision Tree (current code)
 
                     Input: Text Block
                            │
@@ -295,55 +302,54 @@ The diagram below shows the **target** architecture. Boxes labelled with service
                  Found?│       Not Found
                   Yes  │          │
                        ▼          ▼
-                ┌──────────┐  ┌──────────────────────┐
-                │ Return   │  │ Try Normalized Match │
-                │ (conf:   │  │ lowercase, no punct. │
-                │  1.0)    │  └──────┬───────────────┘
-                └──────────┘         │
+                ┌──────────┐  ┌──────────────────────────────┐
+                │ Return   │  │ Try Normalized Match         │
+                │ (exact)  │  │ lowercase, strip punctuation │
+                └──────────┘  │ and/or strip diacritics      │
+                              └──────┬───────────────────────┘
+                                     │
                                 Found?│       Not Found
                                  Yes  │          │
                                       ▼          ▼
                                ┌──────────┐  ┌──────────────────┐
                                │ Return   │  │ Try Fuzzy Match  │
-                               │ (conf:   │  │ similarity > 85% │
-                               │  0.95)   │  └──────┬───────────┘
-                               └──────────┘         │
-                                               Found?│       Not Found
-                                                Yes  │          │
-                                                     ▼          ▼
-                                              ┌──────────┐  ┌────────────────┐
-                                              │ Return   │  │ Try Dictionary │
-                                              │ (conf:   │  │ word-by-word   │
-                                              │ 0.7-0.9) │  └──────┬─────────┘
-                                              └──────────┘         │
-                                                              Found?│   Not Found
-                                                               Yes  │      │
-                                                                    ▼      ▼
-                                                             ┌──────────┐  ┌────────────┐
-                                                             │ Return   │  │ Flag as    │
-                                                             │ (conf:   │  │ [UNKNOWN]  │
-                                                             │  0.6)    │  │ (conf: 0.0)│
-                                                             └──────────┘  └────────────┘
+                               │ (norm.)  │  │ rapidfuzz ≥ 82   │
+                               └──────────┘  └──────┬───────────┘
+                                                    │
+                                              Found?│       Not Found
+                                               Yes  │          │
+                                                    ▼          ▼
+                                             ┌──────────┐  ┌────────────────────┐
+                                             │ Return   │  │ Word-by-Word       │
+                                             │ (fuzzy)  │  │ per-token lookup   │
+                                             └──────────┘  └──────┬─────────────┘
+                                                                  │
+                                                            Found?│   Not Found
+                                                             Yes  │      │
+                                                                  ▼      ▼
+                                                          ┌──────────┐  ┌──────────────────────┐
+                                                          │ Return   │  │ Internal metadata:   │
+                                                          │ (per-    │  │ [UNKNOWN_FOR_REVIEW] │
+                                                          │  word)   │  │ User-facing label:   │
+                                                          │          │  │ "[Needs review]"     │
+                                                          └──────────┘  └──────────────────────┘
 
 
 ## File Storage Structure
 
 jobs/
   {job_id}/
-    ├── input/
-    │   └── original.pdf              ← Uploaded file
-    ├── structured/
-    │   └── layout_data.json          ← Extracted structure
-    ├── translated/
-    │   └── translations.json         ← Translation results
-    ├── output/
-    │   ├── translated.pdf            ← Final translated PDF
-    │   └── bilingual.pdf             ← Side-by-side version
+    ├── input_<original_filename>     ← Uploaded file (saved at job root)
+    ├── structure.json                ← Page/block structure + warnings
+    ├── translated.pdf                ← Final translated PDF
+    ├── bilingual.pdf                 ← Side-by-side combined PDF
     └── preview/
-        ├── original_page_0.png       ← Preview: Original
+        ├── original_page_0.png       ← Preview: Original (up to 20 pages)
         ├── original_page_1.png
-        ├── translated_page_0.png     ← Preview: Translated
-        └── translated_page_1.png
+        ├── ...
+        ├── translated_page_0.png     ← Preview: Translated (up to 20 pages)
+        ├── translated_page_1.png
+        └── ...
 
 
 ## Technology Stack
@@ -386,7 +392,9 @@ Database:
   • PostgreSQL/MongoDB (production)
 
 Job Queue:
-  • asyncio (development)
+  • asyncio.create_task + asyncio.to_thread (development) — the
+    pipeline coroutine runs in a worker thread so the HTTP event
+    loop stays responsive
   • Celery/RQ (production)
 
 
@@ -400,7 +408,7 @@ Target approach:
   3. Translate only text
   4. Place translated text into the original bboxes
 
-> **Honest claim today:** the system performs **partial layout preservation** for digital PDFs. It re-inserts translated text at the original line bbox, but does **not** yet preserve images, lines, or shapes through reconstruction (the white overlay can erase them), and does not adapt font/size/color/alignment. Do not describe the output as a "perfect visual match" or "exact replica" in any defense or report — see [claude.md](claude.md) "Layout preservation truthfulness" and [agent.md](agent.md) "Honest current claim".
+> **Honest claim today:** the system performs **partial, layout-aware reconstruction** for digital PDFs. Translated text is overlaid on the original PDF page (so non-text objects survive when they fall outside text bboxes), and the inserter is style-aware: it picks a regular/bold/italic/mono/serif fontname, falls back to a style-matched Unicode TTF for diacritics, enforces a readable minimum font size, shrinks then ellipsizes overflowing text, forces visible color over the white mask, and falls back to the original line or `[Needs review]` when the translation cannot fit. **Exact embedded-font reuse is not guaranteed**; the closest available built-in font is used and a one-time substitution warning is recorded. Decorative elements that overlap a text bbox can still be covered by the white mask. Do not describe the output as a "perfect visual match" or "exact replica" in any defense or report — see [claude.md](claude.md) "Layout preservation truthfulness" and [agent.md](agent.md) "Honest current claim".
 
 This still matters for educational materials because:
   • Diagrams should align with text
