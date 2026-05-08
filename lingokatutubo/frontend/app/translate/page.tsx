@@ -39,31 +39,61 @@ interface JobProgressStatus {
 }
 
 const PHASE_LABELS: Record<string, string> = {
+  uploading: 'Uploading document',
   queued: 'Queued for processing',
   uploaded: 'Queued for processing',
-  detecting: 'Detecting document type',
+  detecting: 'Detecting document',
   extracting: 'Extracting text and layout',
-  ocr: 'Running OCR for scanned document',
-  translating: 'Translating text',
-  reconstructing: 'Reconstructing translated PDF',
-  preview_generation: 'Creating document previews',
+  ocr: 'Running OCR',
+  translating: 'Translating',
+  reconstructing: 'Reconstructing document',
+  preview_generation: 'Creating preview',
   bilingual_output: 'Preparing bilingual output',
   completed: 'Completed',
+};
+
+const PHASE_PROGRESS_FALLBACK: Record<string, number> = {
+  uploading: 3,
+  queued: 5,
+  uploaded: 5,
+  detecting: 15,
+  extracting: 30,
+  ocr: 45,
+  translating: 65,
+  reconstructing: 80,
+  preview_generation: 90,
+  bilingual_output: 95,
+  completed: 100,
 };
 
 const normalizeJobStatus = (status?: string): string =>
   String(status || '').trim().toLowerCase();
 
 const toProgressPercent = (status: JobProgressStatus | null): number | null => {
+  const phase = normalizeJobStatus(status?.current_phase || status?.status);
   const value =
     status?.progress_percent !== undefined
       ? status.progress_percent
       : status?.progress;
-  if (value === undefined || value === null) return null;
+  if (value === undefined || value === null) {
+    return PHASE_PROGRESS_FALLBACK[phase] ?? null;
+  }
 
   const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return null;
+  if (!Number.isFinite(numericValue)) {
+    return PHASE_PROGRESS_FALLBACK[phase] ?? null;
+  }
+
   return Math.max(0, Math.min(100, Math.round(numericValue)));
+};
+
+const progressTitleFor = (
+  status: JobProgressStatus | null,
+  isUploading: boolean,
+): string => {
+  const phase = normalizeJobStatus(status?.current_phase || status?.status);
+  if (isUploading || phase === 'uploading') return 'Uploading';
+  return PHASE_LABELS[phase] || status?.current_step || 'Processing document';
 };
 
 export default function TranslatePage() {
@@ -184,17 +214,17 @@ export default function TranslatePage() {
     setIsJobComplete(false);
     setJobProgress({
       job_id: '',
-      status: 'processing',
-      progress_percent: 0,
-      current_phase: 'queued',
-      current_step: 'Queued for processing',
-      phase_message: 'Document is waiting to be processed.',
+      status: 'uploading',
+      progress_percent: PHASE_PROGRESS_FALLBACK.uploading,
+      current_phase: 'uploading',
+      current_step: 'Uploading document',
+      phase_message: 'Uploading document to the backend...',
     });
     detectionShownRef.current = false;
 
     const response = await upload(selectedFile, sourceLanguage, targetLanguage);
 
-    if (response) {
+    if (response && normalizeJobStatus(response.status) !== 'failed') {
       setUploadId(response.job_id);
       setUploadStatus('success');
       setIsDetectingLanguage(true);
@@ -202,7 +232,7 @@ export default function TranslatePage() {
       setJobProgress({
         job_id: response.job_id,
         status: response.status,
-        progress_percent: response.progress_percent ?? 0,
+        progress_percent: response.progress_percent ?? PHASE_PROGRESS_FALLBACK.queued,
         current_phase: response.current_phase ?? 'queued',
         current_step: response.current_step ?? 'Queued for processing',
         phase_message: response.phase_message ?? response.message,
@@ -212,7 +242,7 @@ export default function TranslatePage() {
       pollStatus(response.job_id);
     } else {
       setUploadStatus('error');
-      setErrorMessage(uploadError || 'Translation failed. Please try again.');
+      setErrorMessage(response?.message || uploadError || 'Translation failed. Please try again.');
       setJobProgress(null);
     }
   };
@@ -381,6 +411,7 @@ export default function TranslatePage() {
 
   const progressPercent = toProgressPercent(jobProgress);
   const progressPhase = jobProgress?.current_phase ?? '';
+  const progressTitle = progressTitleFor(jobProgress, isUploading);
   const progressStep =
     jobProgress?.current_step ||
     PHASE_LABELS[progressPhase] ||
@@ -390,7 +421,7 @@ export default function TranslatePage() {
     jobProgress?.message ||
     PHASE_LABELS[progressPhase] ||
     'Processing document...';
-  const showProgressCard = !!uploadId && !!jobProgress && !errorMessage;
+  const showProgressCard = !!jobProgress && !errorMessage && (isUploading || !!uploadId);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background via-white to-background">
@@ -505,7 +536,7 @@ export default function TranslatePage() {
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div>
                     <p className="text-base font-bold text-primary">
-                      Processing document
+                      {progressTitle}
                       {progressPercent != null ? `... ${progressPercent}%` : '...'}
                     </p>
                     <p className="text-sm text-foreground/70 mt-1">
