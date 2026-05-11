@@ -41,6 +41,20 @@ class ReconstructionService:
         return str(value)
 
     @classmethod
+    def _translation_record_for_line(
+        cls,
+        translations: Dict[str, Any],
+        lookup_key: str,
+        original_text: str,
+    ) -> Any:
+        """Return the raw translation record for a line (dict, str, or None)."""
+        candidate_keys = [lookup_key, original_text, original_text.strip()]
+        for key in candidate_keys:
+            if key and key in translations:
+                return translations.get(key)
+        return None
+
+    @classmethod
     def _translated_text_for_line(
         cls,
         translations: Dict[str, Any],
@@ -48,11 +62,10 @@ class ReconstructionService:
         original_text: str,
     ) -> str:
         """Resolve translated text by layout key first, then by original source text."""
-        candidate_keys = [lookup_key, original_text, original_text.strip()]
-        for key in candidate_keys:
-            if key and key in translations:
-                return cls._coerce_translation_value(translations.get(key), original_text)
-        return cls.FALLBACK_REVIEW_TEXT
+        record = cls._translation_record_for_line(translations, lookup_key, original_text)
+        if record is None:
+            return cls.FALLBACK_REVIEW_TEXT
+        return cls._coerce_translation_value(record, original_text)
 
     @staticmethod
     def _rect_from_bbox(
@@ -284,22 +297,6 @@ class ReconstructionService:
                 wrapped.append(current)
         return wrapped
 
-    @classmethod
-    def _ellipsize(
-        cls,
-        line: str,
-        font: fitz.Font,
-        fontsize: float,
-        max_width: float,
-    ) -> str:
-        suffix = "..."
-        if cls._text_width(font, suffix, fontsize) > max_width:
-            return ""
-        candidate = line.rstrip()
-        while candidate and cls._text_width(font, candidate + suffix, fontsize) > max_width:
-            candidate = candidate[:-1].rstrip()
-        return (candidate + suffix) if candidate else suffix
-
     @staticmethod
     def _line_height(fontsize: float) -> float:
         return fontsize * ReconstructionService.LINE_HEIGHT_FACTOR
@@ -356,15 +353,12 @@ class ReconstructionService:
             fontsize -= 0.5
             shrunk = True
 
+        # Rule 5: if the translated text still does not fit after shrinking to
+        # the readable floor, keep it intact and let it overflow rather than
+        # truncating. Reconstruction must never silently drop translated text.
         fontsize = min_font_size
         lines = cls._wrap_text(text, font, fontsize, max_width)
-        max_lines = max(1, int(max_height / cls._line_height(fontsize)))
-        truncated = len(lines) > max_lines
-        if truncated:
-            lines = lines[:max_lines]
-            if lines:
-                lines[-1] = cls._ellipsize(lines[-1], font, fontsize, max_width)
-        return "\n".join(lines), fontsize, True, truncated
+        return "\n".join(lines), fontsize, True, True
 
     @classmethod
     def _insert_text_in_rect(
@@ -379,7 +373,11 @@ class ReconstructionService:
         line_number: int,
         fallback_text: Optional[str] = None,
     ) -> bool:
-        fallback_text = (fallback_text or cls.FALLBACK_REVIEW_TEXT).strip() or cls.FALLBACK_REVIEW_TEXT
+        # The only fallback text we ever render is the review marker. Callers
+        # may still pass the source-language original for logging/diagnostic
+        # purposes, but we never draw it into the translated PDF.
+        del fallback_text
+        fallback_text = cls.FALLBACK_REVIEW_TEXT
         fontname = cls._fontname_for_line(line)
         unicode_fontfile = cls._unicode_fontfile() if cls._needs_unicode_font(text) else None
         if unicode_fontfile:
@@ -439,7 +437,8 @@ class ReconstructionService:
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                "translated text exceeded its bbox and was truncated.",
+                "translated text exceeds its bbox at the readable font floor; "
+                "rendering it anyway to preserve the full translation.",
             )
 
         color = cls._visible_text_color(
@@ -455,25 +454,70 @@ class ReconstructionService:
             else [(fontname, None), ("helv", None)]
         )
 
+        last_exception: Optional[Exception] = None
+        page_rect = page.rect
         for candidate_font, candidate_fontfile in candidates:
+            insert_args = {
+                "fontsize": fontsize,
+                "fontname": candidate_font,
+                "color": color,
+                "align": fitz.TEXT_ALIGN_LEFT,
+                "overlay": True,
+            }
+            if candidate_fontfile:
+                insert_args["fontfile"] = candidate_fontfile
+
+            # Rule 5: if the translated text overflows the original bbox, grow
+            # the rect downward (and as a last resort sideways) until it fits,
+            # rather than dropping the translation. We never go past the page
+            # margin, and we record an overflow warning so reviewers can see
+            # that the layout was expanded.
+            target_rect = fitz.Rect(rect)
             try:
-                insert_args = {
-                    "fontsize": fontsize,
-                    "fontname": candidate_font,
-                    "color": color,
-                    "align": fitz.TEXT_ALIGN_LEFT,
-                    "overlay": True,
-                }
-                if candidate_fontfile:
-                    insert_args["fontfile"] = candidate_fontfile
-                result = page.insert_textbox(
-                    rect,
-                    fitted_text,
-                    **insert_args,
-                )
-                if result >= -0.01:
-                    return True
+                result = page.insert_textbox(target_rect, fitted_text, **insert_args)
+                tries = 0
+                while result < -0.01 and tries < 6 and target_rect.y1 < page_rect.y1 - 2:
+                    extra = max(2.0, -result + 1.0)
+                    new_y1 = min(page_rect.y1 - 1, target_rect.y1 + extra)
+                    if new_y1 <= target_rect.y1 + 0.1:
+                        break
+                    target_rect = fitz.Rect(
+                        target_rect.x0,
+                        target_rect.y0,
+                        target_rect.x1,
+                        new_y1,
+                    )
+                    # Mask the expanded region so any underlying content does
+                    # not bleed through, then redraw the translated text.
+                    page.draw_rect(
+                        target_rect,
+                        color=(1, 1, 1),
+                        fill=(1, 1, 1),
+                        width=0,
+                        overlay=True,
+                    )
+                    result = page.insert_textbox(target_rect, fitted_text, **insert_args)
+                    tries += 1
+
+                if result < -0.01:
+                    # Still overflowing after expansion attempts: fall through
+                    # to insert_text below so at least the first line of the
+                    # translation is drawn instead of silently dropped.
+                    raise RuntimeError(
+                        f"insert_textbox could not fit translated text after expansion "
+                        f"(missing {-result:.1f}pt)"
+                    )
+
+                if target_rect.y1 - rect.y1 > 0.5:
+                    cls._append_warning(
+                        warnings,
+                        f"Page {page_number}, block {block_number}, line {line_number}: "
+                        f"translated text overflowed its bbox; expanded vertically by "
+                        f"{target_rect.y1 - rect.y1:.1f}pt to keep the translation visible.",
+                    )
+                return True
             except Exception as e:
+                last_exception = e
                 if candidate_fontfile:
                     cls._append_warning(
                         warnings,
@@ -486,96 +530,100 @@ class ReconstructionService:
                         f"Page {page_number}, block {block_number}, line {line_number}: "
                         f"failed to insert translated text: {e}",
                     )
-        cls._append_warning(
-            warnings,
-            f"Page {page_number}, block {block_number}, line {line_number}: "
-            "translated text did not fit after font reduction; using visible fallback text.",
-        )
-        fallback_candidates = []
-        for candidate in (fallback_text, cls.FALLBACK_REVIEW_TEXT):
-            safe_candidate = cls._pdf_safe_text(candidate)
-            if safe_candidate and safe_candidate not in fallback_candidates:
-                fallback_candidates.append(safe_candidate)
 
-        for candidate in fallback_candidates:
-            fitted_fallback, fallback_size, _, _ = cls._fit_text_to_rect(
-                candidate,
-                rect,
-                "helv",
-                min(base_font_size, 8.0),
+        # Unconstrained fallback: draw the translated text line-by-line using
+        # insert_text starting at the bbox origin. This may visually overflow
+        # the page region, but we have already shrunk to the readable floor
+        # and rule 5 says draw the translation anyway rather than dropping it.
+        try:
+            font_for_width = cls._font(
+                "LinguaSans" if unicode_fontfile else fontname,
+                fontfile=unicode_fontfile,
             )
-            visible_fallback = fitted_fallback.strip() or cls.FALLBACK_REVIEW_TEXT
-            try:
-                result = page.insert_textbox(
-                    rect,
-                    visible_fallback,
-                    fontsize=fallback_size,
-                    fontname="helv",
-                    color=(0.0, 0.0, 0.0),
-                    align=fitz.TEXT_ALIGN_LEFT,
-                    overlay=True,
-                )
-                if result >= -0.01:
-                    return True
-            except Exception:
-                pass
-
-            try:
-                baseline_y = max(rect.y0 + cls.MIN_FONT_SIZE, min(rect.y1 - 1, rect.y0 + fallback_size))
-                page.insert_text(
-                    (rect.x0 + 0.5, baseline_y),
-                    visible_fallback.splitlines()[0],
-                    fontsize=max(4.0, min(fallback_size, cls.MIN_FONT_SIZE)),
-                    fontname="helv",
-                    color=(0.0, 0.0, 0.0),
-                    overlay=True,
-                )
-                return True
-            except Exception as e:
-                cls._append_warning(
-                    warnings,
-                    f"Page {page_number}, block {block_number}, line {line_number}: "
-                    f"failed to insert fallback text: {e}",
-                )
-
-        return False
-
-    @classmethod
-    def _restore_original_text(
-        cls,
-        page: fitz.Page,
-        rect: fitz.Rect,
-        original_text: str,
-        line: Dict[str, Any],
-        warnings: Optional[List[str]],
-        page_number: int,
-        block_number: int,
-        line_number: int,
-    ) -> bool:
-        if not original_text.strip():
-            return False
-
-        restore_line = dict(line)
-        restore_line["color"] = [0, 0, 0]
-        restored = cls._insert_text_in_rect(
-            page,
-            rect,
-            original_text,
-            restore_line,
-            warnings,
-            page_number,
-            block_number,
-            line_number,
-            fallback_text=cls.FALLBACK_REVIEW_TEXT,
-        )
-        if restored:
+            wrapped_lines = cls._wrap_text(
+                fitted_text.replace("\n", " "),
+                font_for_width,
+                fontsize,
+                max(1.0, rect.width),
+            )
+            baseline = rect.y0 + fontsize
+            insert_args = {
+                "fontsize": fontsize,
+                "fontname": "LinguaSans" if unicode_fontfile else fontname,
+                "color": color,
+                "overlay": True,
+            }
+            if unicode_fontfile:
+                insert_args["fontfile"] = unicode_fontfile
+            for line_text in wrapped_lines:
+                if baseline > page_rect.y1 - 1:
+                    break
+                page.insert_text((rect.x0 + 0.5, baseline), line_text, **insert_args)
+                baseline += cls._line_height(fontsize)
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                "translated insertion failed; original text was preserved visibly.",
+                "translated text was drawn using unconstrained insert_text fallback "
+                "after insert_textbox could not fit it (translation preserved).",
             )
-        return restored
-    
+            return True
+        except Exception as e:
+            last_exception = e
+
+        # All translated-text draw attempts threw before drawing anything. As a
+        # last resort, render the review marker so the bbox is not left empty.
+        # We never substitute the source-language original here.
+        cls._append_warning(
+            warnings,
+            f"Page {page_number}, block {block_number}, line {line_number}: "
+            "translated text could not be inserted; using review marker.",
+        )
+        marker = cls._pdf_safe_text(cls.FALLBACK_REVIEW_TEXT)
+        fitted_marker, marker_size, _, _ = cls._fit_text_to_rect(
+            marker,
+            rect,
+            "helv",
+            min(base_font_size, 8.0),
+        )
+        visible_marker = fitted_marker.strip() or cls.FALLBACK_REVIEW_TEXT
+        try:
+            page.insert_textbox(
+                rect,
+                visible_marker,
+                fontsize=marker_size,
+                fontname="helv",
+                color=(0.0, 0.0, 0.0),
+                align=fitz.TEXT_ALIGN_LEFT,
+                overlay=True,
+            )
+            return True
+        except Exception:
+            pass
+
+        try:
+            baseline_y = max(
+                rect.y0 + cls.MIN_FONT_SIZE,
+                min(rect.y1 - 1, rect.y0 + marker_size),
+            )
+            page.insert_text(
+                (rect.x0 + 0.5, baseline_y),
+                visible_marker.splitlines()[0],
+                fontsize=max(4.0, min(marker_size, cls.MIN_FONT_SIZE)),
+                fontname="helv",
+                color=(0.0, 0.0, 0.0),
+                overlay=True,
+            )
+            return True
+        except Exception as e:
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                f"failed to insert review marker: {e}"
+                + (f" (last translated-text error: {last_exception})" if last_exception else ""),
+            )
+
+        return False
+
     @staticmethod
     def reconstruct_pdf(
         input_pdf_path: str,
@@ -601,12 +649,12 @@ class ReconstructionService:
         """
         try:
             doc = fitz.open(input_pdf_path)
-            
+
             # Process each page
             for page_num, page_layout in enumerate(layout_data):
                 if page_num >= doc.page_count:
                     break
-                
+
                 page = doc[page_num]
                 blocks = page_layout.get("blocks", [])
 
@@ -623,34 +671,64 @@ class ReconstructionService:
                         f"Page {page_num + 1}: layout height differs from source PDF page height.",
                     )
 
-                # Add translated text over the original page. The original PDF
-                # remains the base layer, so images/vector objects are retained.
+                # Two-pass approach per page:
+                #   (1) Collect every (rect, translated_text, line, indices)
+                #       task and queue redactions for digital PDFs.
+                #   (2) Apply redactions to erase the source glyphs from the
+                #       text layer (images / lines / shapes outside the rect
+                #       are preserved).
+                #   (3) Draw the translated text into each rect on top of the
+                #       cleaned page.
+                # This guarantees the translated PDF never contains the
+                # source-language original — visually, via copy/paste, or via
+                # text extraction — without flattening the page or destroying
+                # non-text layout.
+                tasks: List[Dict[str, Any]] = []
                 for block_idx, block in enumerate(blocks, start=1):
                     if block.get("type") != "text":
                         continue
-                    
+
                     lines = block.get("lines", [])
-                    
+
                     for line_idx, line in enumerate(lines, start=1):
                         original_text = line.get("text", "")
                         lookup_key = f"{page_num}_{block_idx - 1}_{line_idx - 1}"
-                        translated_text = ReconstructionService._translated_text_for_line(
+                        translation_record = ReconstructionService._translation_record_for_line(
                             translations,
                             lookup_key,
                             original_text,
+                        )
+                        translated_text = ReconstructionService._coerce_translation_value(
+                            translation_record,
+                            original_text,
+                        )
+                        translation_method = (
+                            str(translation_record.get("method") or "").lower()
+                            if isinstance(translation_record, dict)
+                            else ""
                         )
                         line_bbox = line.get("bbox")
 
                         if not line_bbox or not translated_text:
                             continue
 
-                        if translated_text.strip() == original_text.strip():
+                        # Identity translations (same source/target language)
+                        # are the only safe case for skipping. Never skip when
+                        # the dataset gave us an exact_phrase / fuzzy_phrase /
+                        # word_by_word translation, even if its rendered form
+                        # happens to coincide with the source text.
+                        if (
+                            translation_method == "identity"
+                            and translated_text.strip() == original_text.strip()
+                        ):
                             continue
 
                         rect = ReconstructionService._rect_from_bbox(
                             line_bbox,
                             page.rect,
-                            padding=0.75 if is_scanned else 0.5,
+                            # Widen the mask slightly so digital-PDF glyph
+                            # descenders never bleed through the overlay.
+                            padding=1.5 if is_scanned else 1.25,
                         )
                         if rect is None:
                             ReconstructionService._append_warning(
@@ -660,52 +738,95 @@ class ReconstructionService:
                             )
                             continue
 
+                        tasks.append({
+                            "rect": rect,
+                            "translated_text": translated_text,
+                            "line": line,
+                            "block_idx": block_idx,
+                            "line_idx": line_idx,
+                        })
+
+                # Pass 2: erase the source text layer in every queued rect
+                # before drawing translations on top. For scanned PDFs we have
+                # nothing to redact, so a plain white rect is enough.
+                if not is_scanned and tasks:
+                    try:
+                        for task in tasks:
+                            page.add_redact_annot(
+                                task["rect"],
+                                fill=(1.0, 1.0, 1.0),
+                                cross_out=False,
+                            )
+                        apply_kwargs = {"images": 0, "graphics": 0}
+                        try:
+                            page.apply_redactions(**apply_kwargs)
+                        except TypeError:
+                            # Older PyMuPDF builds do not accept the kw flags;
+                            # fall back to the default redaction which still
+                            # preserves images by default.
+                            page.apply_redactions()
+                    except Exception as e:
+                        ReconstructionService._append_warning(
+                            layout_warnings,
+                            f"Page {page_num + 1}: failed to redact source text "
+                            f"({e}); falling back to white-mask overlay.",
+                        )
+                        for task in tasks:
+                            try:
+                                page.draw_rect(
+                                    task["rect"],
+                                    color=(1, 1, 1),
+                                    fill=(1, 1, 1),
+                                    width=0,
+                                    overlay=True,
+                                )
+                            except Exception:
+                                pass
+                elif is_scanned:
+                    for task in tasks:
                         try:
                             page.draw_rect(
-                                rect,
+                                task["rect"],
                                 color=(1, 1, 1),
                                 fill=(1, 1, 1),
                                 width=0,
                                 overlay=True,
                             )
-                            inserted = ReconstructionService._insert_text_in_rect(
-                                page,
-                                rect,
-                                translated_text,
-                                line,
-                                layout_warnings,
-                                page_num + 1,
-                                block_idx,
-                                line_idx,
-                                fallback_text=original_text or ReconstructionService.FALLBACK_REVIEW_TEXT,
-                            )
-                            if not inserted:
-                                restored = ReconstructionService._restore_original_text(
-                                    page,
-                                    rect,
-                                    original_text,
-                                    line,
-                                    layout_warnings,
-                                    page_num + 1,
-                                    block_idx,
-                                    line_idx,
-                                )
-                                ReconstructionService._append_warning(
-                                    layout_warnings,
-                                    f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
-                                    + (
-                                        "white mask was drawn but no replacement text could be inserted."
-                                        if not restored
-                                        else "translated text could not be inserted; original text was restored."
-                                    ),
-                                )
-                        except Exception as e:
-                            print(f"[Reconstruction] Error inserting text: {e}")
+                        except Exception:
+                            pass
+
+                # Pass 3: draw the translated text into each (now-cleaned) rect.
+                for task in tasks:
+                    rect = task["rect"]
+                    translated_text = task["translated_text"]
+                    line = task["line"]
+                    block_idx = task["block_idx"]
+                    line_idx = task["line_idx"]
+                    try:
+                        inserted = ReconstructionService._insert_text_in_rect(
+                            page,
+                            rect,
+                            translated_text,
+                            line,
+                            layout_warnings,
+                            page_num + 1,
+                            block_idx,
+                            line_idx,
+                        )
+                        if not inserted:
                             ReconstructionService._append_warning(
                                 layout_warnings,
                                 f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
-                                f"failed to draw translated text: {e}",
+                                "source text was removed but neither translated text nor "
+                                "review marker could be inserted; original English was NOT restored."
                             )
+                    except Exception as e:
+                        print(f"[Reconstruction] Error inserting text: {e}")
+                        ReconstructionService._append_warning(
+                            layout_warnings,
+                            f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
+                            f"failed to draw translated text: {e}",
+                        )
             
             # Save output PDF
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

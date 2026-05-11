@@ -232,7 +232,10 @@ class ReconstructionTests(unittest.TestCase):
         self.assertEqual(round(out_doc[0].rect.height), 220)
         out_doc.close()
 
-    def test_fit_text_prefers_readable_minimum_before_truncating(self):
+    def test_fit_text_keeps_full_translation_with_overflow_flag(self):
+        """Per rule 5 the translation must never be truncated: when the text
+        cannot fit even at the readable font floor, the function reports the
+        overflow but keeps every word of the translation intact."""
         rect = fitz.Rect(40, 58, 88, 74)
 
         fitted, fontsize, shrunk, truncated = ReconstructionService._fit_text_to_rect(
@@ -244,10 +247,18 @@ class ReconstructionTests(unittest.TestCase):
 
         self.assertTrue(shrunk)
         self.assertTrue(truncated)
-        self.assertGreaterEqual(fontsize, ReconstructionService.READABLE_MIN_FONT_SIZE)
-        self.assertIn("...", fitted)
+        self.assertNotIn("...", fitted)
+        for word in (
+            "This",
+            "translated",
+            "phrase",
+            "longer",
+            "original",
+            "line",
+        ):
+            self.assertIn(word, fitted)
 
-    def test_reconstruction_truncates_long_text_with_readable_font_warning(self):
+    def test_reconstruction_records_overflow_warning_for_long_translation(self):
         input_pdf = self.tmp_path / "input-readable.pdf"
         output_pdf = self.tmp_path / "translated-readable.pdf"
         self._write_base_pdf(input_pdf)
@@ -279,10 +290,25 @@ class ReconstructionTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
-        self.assertTrue(any("truncated" in warning for warning in warnings))
+        self.assertTrue(
+            any("exceeds its bbox" in warning or "overflowed" in warning for warning in warnings),
+            f"expected overflow warning, got: {warnings}",
+        )
         self.assertFalse(any("5.5pt" in warning for warning in warnings))
 
-    def test_reconstruction_inserts_visible_fallback_when_translation_cannot_fit(self):
+        out_doc = fitz.open(output_pdf)
+        extracted = out_doc[0].get_text()
+        out_doc.close()
+        # The source word must not survive the swap — the long translation is
+        # rendered with overflow, never replaced by the original "Hello".
+        self.assertNotIn("Hello", extracted)
+        self.assertIn("translated", extracted)
+
+    def test_reconstruction_never_substitutes_source_when_translation_cannot_fit(self):
+        """Rule 6: reconstruction must never quietly write the source-language
+        original back into the translated PDF, even when the bbox is too small
+        for the translation. The translated text (or the review marker) is
+        drawn instead, possibly overflowing the original bbox."""
         input_pdf = self.tmp_path / "input.pdf"
         output_pdf = self.tmp_path / "translated-fallback.pdf"
         self._write_base_pdf(input_pdf)
@@ -318,9 +344,22 @@ class ReconstructionTests(unittest.TestCase):
         extracted = out_doc[0].get_text()
         out_doc.close()
 
-        self.assertIn("Hello", extracted)
+        # The original English source text must NOT appear as a contiguous
+        # word in the translated PDF when a translation was provided. The
+        # translation may itself be heavily wrapped because the bbox is tiny,
+        # so we compare against a whitespace-stripped form to remain robust
+        # to per-character line breaks.
+        self.assertNotIn("Hello", extracted)
+        joined = "".join(extracted.split())
+        contains_translation = any(
+            token in joined for token in ("replacement", "tiny", "bbox")
+        )
+        contains_review_marker = "[UNKNOWN_FOR_REVIEW]" in joined
+        self.assertTrue(
+            contains_translation or contains_review_marker,
+            f"expected translated content or review marker; got: {extracted!r}",
+        )
         self.assertFalse(any("skipped" in warning for warning in warnings))
-        self.assertTrue(any("fallback" in warning for warning in warnings))
 
     def test_reconstruction_forces_visible_color_over_white_mask(self):
         input_pdf = self.tmp_path / "input-white-text.pdf"

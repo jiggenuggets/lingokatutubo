@@ -940,14 +940,23 @@ class PipelineService:
                         original = (line.get("text") or "").strip()
                         line_key = f"{page_idx}_{block_idx - 1}_{line_idx - 1}"
                         block_id = f"{page_idx}_{block_idx - 1}"
-                        translated = (
-                            translations.get(line_key, {}).get("translated")
-                            or translations.get(block_id, {}).get("translated")
-                            or translations.get(original, {}).get("translated")
-                            or original
+                        record = (
+                            translations.get(line_key)
+                            or translations.get(block_id)
+                            or translations.get(original)
+                            or {}
                         )
-                        
-                        if not translated or translated.strip() == original:
+                        method = str(record.get("method") or "").lower() if isinstance(record, dict) else ""
+                        translated = record.get("translated") if isinstance(record, dict) else None
+                        # Never silently fall back to the source-language text:
+                        # if we have no translation, draw the review marker so
+                        # the user can see the gap instead of being misled.
+                        if not translated or not str(translated).strip():
+                            translated = UNKNOWN_FOR_REVIEW
+
+                        if not translated:
+                            continue
+                        if method == "identity" and translated.strip() == original:
                             continue
 
                         rect = self.reconstruction_service._rect_from_bbox(
@@ -972,7 +981,6 @@ class PipelineService:
                             page_idx + 1,
                             block_idx,
                             line_idx,
-                            fallback_text=original or self.reconstruction_service.FALLBACK_REVIEW_TEXT,
                         )
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

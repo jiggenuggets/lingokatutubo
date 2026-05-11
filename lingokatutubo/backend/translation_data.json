@@ -10149,6 +10149,136 @@
       "cebuano": "tulingan",
       "source": "phrasebook",
       "notes": "auto-split from slash values"
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Madigár. Ahu kó.",
+      "english": "Hello, come in.",
+      "filipino": "Kamusta. Pasok po kayo.",
+      "cebuano": "Maayo. Sulod mo.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:2,6|confidence:high|word_map:Hello=Madigár(id2),come_in=Ahu_kó(id6)",
+      "id": 1016
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Unsad kó. [UNKNOWN_FOR_REVIEW].",
+      "english": "Sit down, please.",
+      "filipino": "Maupo kayo, pakisuyo.",
+      "cebuano": "Lingkod mo, palihug.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:7|confidence:medium|word_map:sit_down=Unsad_kó(id7),please=UNKNOWN_FOR_REVIEW",
+      "id": 1017
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Sadanné ngadan nu?",
+      "english": "What's your name?",
+      "filipino": "Anong pangalan mo?",
+      "cebuano": "Kinsa imong ngalan?",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:87|confidence:high|word_map:full_exact_phrase(id87)",
+      "id": 1018
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Salamat.",
+      "english": "Thank you.",
+      "filipino": "Salamat po.",
+      "cebuano": "Salamat.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:710|confidence:high|word_map:full_exact_phrase(id710)",
+      "id": 1019
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Ágkabágákanna. Pahá ka tut duktur.",
+      "english": "I'm sick. Go to the doctor.",
+      "filipino": "May sakit ako. Magpatingin ka sa doktor.",
+      "cebuano": "Nagsakit ko. Magpatan-aw ka sa doktor.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:305,306|confidence:high|word_map:I'm_sick=Ágkabágákanna(id305),go_to_doctor=Pahá_ka_tut_duktur(id306)",
+      "id": 1020
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Ágballusánna asta ágkatákkanganna.",
+      "english": "I am hungry and thirsty.",
+      "filipino": "Nagugutom ako at nauuhaw.",
+      "cebuano": "Gigutom ko ug giuhaw.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:494|confidence:high|word_map:full_exact_phrase(id494)",
+      "id": 1021
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Makatabang ka kanak? Ándà sóddór ku.",
+      "english": "Can you help me? I don't know.",
+      "filipino": "Matutulungan mo ba ako? Hindi ko alam.",
+      "cebuano": "Makatabang ka ba sa akoa? Wala ko kahibalo.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:92,55|confidence:high|word_map:can_you_help_me=Makatabang_ka_kanak(id92),i_dont_know=Ándà_sóddór_ku(id55)",
+      "id": 1022
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Sadun ka dini. Unsad kó.",
+      "english": "Come here. Sit down.",
+      "filipino": "Halika rito. Maupo kayo.",
+      "cebuano": "Dali diri. Lingkod mo.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:61,7|confidence:high|word_map:come_here=Sadun_ka_dini(id61),sit_down=Unsad_kó(id7)",
+      "id": 1023
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Nigá [UNKNOWN_FOR_REVIEW] madigár állá.",
+      "english": "Today is a good day.",
+      "filipino": "Ngayon ay isang magandang araw.",
+      "cebuano": "Karon maayo nga adlaw.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:751,213,747|confidence:low|word_map:today=nigá(id751),good=madigár(id213),day=állá(id747),is_a=UNKNOWN_FOR_REVIEW(grammatical_connector)",
+      "id": 1024
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Mulì ad. Panó kid.",
+      "english": "I'll be going home now. Let's go.",
+      "filipino": "Uuwi na ako. Tayo na.",
+      "cebuano": "Mouli nako. Adto na ta.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:22,23|confidence:high|word_map:going_home=Mulì_ad(id22),lets_go=Panó_kid(id23)",
+      "id": 1025
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Gahà a dád. Tákkás ka kanak.",
+      "english": "I just came to visit. Come with me.",
+      "filipino": "Dumadalaw lang ako. Sumama ka sa akin.",
+      "cebuano": "Nagbisita lang ko. Uban sa akoa.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:94,68|confidence:high|word_map:came_to_visit=Gahà_a_dád(id94),come_with_me=Tákkás_ka_kanak(id68)",
+      "id": 1026
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Ágkabágákan ka? Madigár dán.",
+      "english": "Are you sick? He is well now.",
+      "filipino": "May sakit ka ba? Magaling na s'ya.",
+      "cebuano": "Nagsakit ka? Maayo na.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:304,79|confidence:high|word_map:are_you_sick=Ágkabágákan_ka(id304),well_now=Madigár_dán(id79)",
+      "id": 1027
+    },
+    {
+      "topic": "phrase_samples",
+      "tagabawa": "Ágballusán. Kadigárrannad kuman.",
+      "english": "I am hungry. I'd like to eat now.",
+      "filipino": "Nagugutom ako. Gusto ko nang kumain.",
+      "cebuano": "Gigutum. Gusto ko mokaon na.",
+      "source": "phrase_sample",
+      "notes": "phrase_sample|source_ids:319,83|confidence:high|word_map:hungry=Ágballusán(id319),want_to_eat=Kadigárrannad_kuman(id83)",
+      "id": 1028
     }
   ]
 }
