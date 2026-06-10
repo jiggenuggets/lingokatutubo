@@ -1,0 +1,110 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Translate Documents{% endblock %}
+
+{% block content %}
+<main class="translator-page">
+  <header class="page-heading compact">
+    <h1>Document Translator</h1>
+    <p>Translate between Bagobo-Tagabawa, Filipino, English, and Cebuano.</p>
+  </header>
+
+  <section class="translator-shell">
+    <form
+      id="upload-form"
+      class="upload-panel"
+      method="post"
+      enctype="multipart/form-data"
+      data-upload-url="{% url 'translator:upload' %}"
+      data-status-base="/translate/status/"
+      data-preview-base="/translate/preview/"
+      data-download-base="/translate/download/"
+    >
+      {% csrf_token %}
+      <label id="drop-zone" class="drop-zone" for="id_file">
+        <input id="id_file" name="file" type="file" accept=".pdf,.docx,.jpg,.jpeg,.png">
+        <span class="drop-icon">PDF</span>
+        <strong id="selected-file-name">Drop your document here</strong>
+        <small id="selected-file-meta">PDF, DOCX, JPG, or PNG up to 50 MB</small>
+      </label>
+
+      <div id="upload-error" class="alert error" hidden></div>
+      <div id="ready-message" class="alert success" hidden>File ready. Start the translation when ready.</div>
+
+      <div id="progress-card" class="progress-card" hidden>
+        <div class="progress-top">
+          <div>
+            <strong id="progress-title">Queued</strong>
+            <p id="progress-message">Document is waiting to be processed.</p>
+          </div>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+          <div id="progress-fill"></div>
+        </div>
+        <p class="current-step"><strong>Current step:</strong> <span id="progress-step">Queued</span></p>
+        <p id="detected-language" class="detected-language" hidden></p>
+      </div>
+    </form>
+
+    <aside class="settings-panel">
+      <label>
+        <span>Source Language</span>
+        <select form="upload-form" name="source_language" id="source-language">
+          <option value="auto">Auto-Detect</option>
+          <option value="english">English</option>
+          <option value="filipino">Filipino / Tagalog</option>
+          <option value="cebuano">Cebuano</option>
+          <option value="tagabawa">Bagobo-Tagabawa</option>
+        </select>
+      </label>
+
+      <label>
+        <span>Target Language</span>
+        <select form="upload-form" name="target_language" id="target-language">
+          <option value="tagabawa">Bagobo-Tagabawa</option>
+          <option value="english">English</option>
+          <option value="filipino">Filipino / Tagalog</option>
+          <option value="cebuano">Cebuano</option>
+        </select>
+      </label>
+
+      <label>
+        <span>OCR Languages</span>
+        <input form="upload-form" name="ocr_languages" type="text" placeholder="Optional, e.g. eng+fil">
+      </label>
+
+      <button id="translate-button" class="button primary full" form="upload-form" type="submit" disabled>
+        Start Translation
+      </button>
+
+      <div id="complete-actions" class="complete-actions" hidden>
+        <a id="download-link" class="button primary full" href="#">Download Translated PDF</a>
+        <a id="preview-link" class="button secondary full" href="#">Preview Bilingual</a>
+      </div>
+    </aside>
+  </section>
+
+  <section class="jobs-section">
+    <h2>Recent Jobs</h2>
+    {% if jobs %}
+      <div class="job-list">
+        {% for job in jobs %}
+          <article class="job-row">
+            <div>
+              <strong>{{ job.original_filename }}</strong>
+              <small>{{ job.created_at|date:"M j, Y H:i" }} - {{ job.source_language }} to {{ job.target_language }}</small>
+            </div>
+            <span class="status-pill {{ job.status }}">{{ job.status }}</span>
+            {% if job.status == "completed" %}
+              <a href="{% url 'translator:preview' job.id %}">Preview</a>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">No translated documents yet.</p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

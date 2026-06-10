@@ -1,0 +1,35 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Sign Up{% endblock %}
+
+{% block content %}
+<main class="auth-page">
+  <form class="auth-panel" method="post">
+    {% csrf_token %}
+    <h1>Create Account</h1>
+    {{ form.non_field_errors }}
+    <label>
+      <span>Username</span>
+      {{ form.username }}
+      {{ form.username.errors }}
+    </label>
+    <label>
+      <span>Email</span>
+      {{ form.email }}
+      {{ form.email.errors }}
+    </label>
+    <label>
+      <span>Password</span>
+      {{ form.password1 }}
+      {{ form.password1.errors }}
+    </label>
+    <label>
+      <span>Confirm Password</span>
+      {{ form.password2 }}
+      {{ form.password2.errors }}
+    </label>
+    <button class="button primary full" type="submit">Sign Up</button>
+    <p>Already registered? <a href="{% url 'translator:login' %}">Log in</a>.</p>
+  </form>
+</main>
+{% endblock %}

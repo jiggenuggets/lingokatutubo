@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "FastAPI backend for Bagobo-Tagabawa document translator"
 requires-python = ">=3.11"
 dependencies = [
+    "django>=5.0,<6.0",
+    "psycopg2-binary>=2.9.9",
     "fastapi[standard]>=0.128.1",
     "pymupdf>=1.24.8",
     "python-docx>=0.8.11",

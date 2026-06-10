@@ -1,4 +1,6 @@
-﻿fastapi[standard]>=0.128.1
+django>=5.0,<6.0
+psycopg2-binary>=2.9.9
+fastapi[standard]>=0.128.1
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 pymupdf>=1.24.8
@@ -12,4 +14,3 @@ pytesseract>=0.3.13
 rapidfuzz>=3.9.0
 langdetect>=1.0.9
 openpyxl>=3.1.0
-

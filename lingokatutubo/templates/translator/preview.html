@@ -1,0 +1,55 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Bilingual Preview{% endblock %}
+
+{% block content %}
+<main
+  id="preview-app"
+  class="preview-page"
+  data-job-id="{{ job.job_id }}"
+  data-preview-url="{% url 'translator:preview_data' job.id %}"
+  data-structure-url="{% url 'translator:structure' job.id %}"
+  data-download-url="{% url 'translator:translate_download' job.id %}"
+>
+  <header class="preview-header">
+    <div>
+      <a class="back-link" href="{% url 'translator:translate' %}">Back to Translate</a>
+      <h1>Bilingual Preview</h1>
+      <p>Job {{ job.job_id|slice:":8" }} - {{ job.original_filename }}</p>
+    </div>
+    <a id="preview-download" class="button primary" href="{% url 'translator:translate_download' job.id %}">Download</a>
+  </header>
+
+  <div id="preview-error" class="alert error" hidden></div>
+  <div id="preview-loading" class="loading-panel">Loading preview...</div>
+
+  <section id="preview-content" hidden>
+    <div class="pager">
+      <div>
+        <button id="previous-page" type="button">Previous</button>
+        <button id="next-page" type="button">Next</button>
+      </div>
+      <p>Page <strong id="current-page">1</strong> of <strong id="page-count">1</strong></p>
+    </div>
+
+    <section class="side-by-side">
+      <div>
+        <h2>Original</h2>
+        <img id="original-image" alt="Original page preview">
+        <p id="original-empty" class="empty-preview" hidden>No original preview for this page.</p>
+      </div>
+      <div>
+        <h2>Translated</h2>
+        <img id="translated-image" alt="Translated page preview">
+        <p id="translated-empty" class="empty-preview" hidden>No translated preview for this page.</p>
+      </div>
+    </section>
+
+    <details class="translation-details">
+      <summary>Translation Details</summary>
+      <div id="details-list"></div>
+      <div id="structure-warnings" class="warning-box" hidden></div>
+    </details>
+  </section>
+</main>
+{% endblock %}

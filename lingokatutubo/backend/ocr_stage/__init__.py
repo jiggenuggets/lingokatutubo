@@ -1,5 +1,3 @@
-"""OCR stage for scanned PDFs and images (Tesseract-backed)."""
+"""Compatibility wrapper for migrated Django translator OCR services."""
 
-from .ocr_service import OCRService, OCRUnavailableError, get_ocr_service
-
-__all__ = ["OCRService", "OCRUnavailableError", "get_ocr_service"]
+from translator.services.ocr_stage import *  # noqa: F401,F403

@@ -2,6 +2,87 @@
 
 > **Status:** the backend runs end-to-end for digital PDFs and DOCX. Scanned-PDF/image OCR is **partially implemented** through Tesseract/pytesseract in `backend/ocr_stage/ocr_service.py`. If Tesseract or a needed language pack is unavailable, scanned jobs fail with warnings in `structure.json` instead of silently producing placeholder text.
 
+## Unified Django App (Current Migration Target)
+
+The Django app replaces the split Next.js + FastAPI runtime with one authenticated
+server. The document pipeline services live under `translator/services/`, while
+`backend/` contains thin compatibility wrappers for the former FastAPI layout.
+Job state and ownership live in the database through `translator.TranslationJob`.
+
+```powershell
+cd "C:\Users\Carl\Desktop\LINGOKATUTUBO\lingokatutubo"
+
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+
+$env:POSTGRES_DB="lingokatutubo"
+$env:POSTGRES_USER="postgres"
+$env:POSTGRES_PASSWORD="postgres"
+$env:POSTGRES_HOST="localhost"
+$env:POSTGRES_PORT="5432"
+
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py runserver 8000
+```
+
+Django URLs:
+- App: http://localhost:8000/
+- Translate: http://localhost:8000/translate/
+- Sign up: http://localhost:8000/accounts/signup/
+- Admin: http://localhost:8000/admin/
+- Health check: http://localhost:8000/health/
+
+Primary translator routes:
+- `POST /translate/upload/`
+- `GET /translate/status/{job_id}/`
+- `GET /translate/structure/{job_id}/`
+- `GET /translate/preview-image/{job_id}/{image_name}/`
+- `GET /translate/download/{job_id}/`
+
+The older `/api/...` paths remain as compatibility aliases during migration.
+
+### Django file storage layout
+
+The Django app configures the reused pipeline to write into `MEDIA_ROOT`
+instead of the old temp directory:
+
+```text
+media/
+  uploads/
+    {job_id}/
+      original-file.pdf
+  jobs/
+    {job_id}/
+      input/
+        original-file.pdf
+      preview/
+        original_page_0.png
+        translated_page_0.png
+      translated/
+        translated.pdf
+        bilingual.pdf
+      structure.json
+```
+
+All preview images and downloads are served through authenticated Django views,
+so users can only access jobs they own.
+
+For a quick local smoke test without PostgreSQL, set this before running
+`migrate`:
+
+```powershell
+$env:DJANGO_USE_SQLITE="1"
+```
+
+## Legacy Split App
+
+The old FastAPI and Next.js development servers are still present for comparison
+while the migration is audited. The Django app above is the current replacement
+path.
+
 ## Prerequisites
 
 - **Python 3.11** — https://www.python.org/downloads/ (check "Add to PATH")

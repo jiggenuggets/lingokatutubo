@@ -1,0 +1,51 @@
+{% extends "translator/base.html" %}
+
+{% block title %}LingoKatutubo Document Translation{% endblock %}
+
+{% block content %}
+<main>
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Preserving Indigenous Language</p>
+      <h1>Bagobo-Tagabawa Document Translation</h1>
+      <p class="hero-text">
+        Translate documents across Bagobo-Tagabawa, Filipino, English, and Cebuano
+        while retaining page structure for review and download.
+      </p>
+      <div class="hero-actions">
+        <a class="button primary" href="{% url 'translator:translate' %}">Start Translating</a>
+        <a class="button secondary" href="{% url 'translator:about' %}">Learn More</a>
+      </div>
+    </div>
+    <div class="document-visual" aria-hidden="true">
+      <div class="paper-sheet">
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div class="translation-panel">
+        <strong>Original</strong>
+        <strong>Translated</strong>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature-band">
+    <div class="section-inner">
+      <h2>Document Workflow</h2>
+      <div class="feature-grid">
+        <article>
+          <h3>Multiple Formats</h3>
+          <p>PDF, DOCX, JPG, and PNG uploads route through digital extraction or OCR.</p>
+        </article>
+        <article>
+          <h3>Persistent Jobs</h3>
+          <p>Uploads, progress, preview metadata, and user ownership are stored in Django.</p>
+        </article>
+        <article>
+          <h3>Bilingual Review</h3>
+          <p>Generated previews place original and translated pages side by side.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+</main>
+{% endblock %}
