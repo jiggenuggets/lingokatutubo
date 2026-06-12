@@ -7,18 +7,24 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "dev-only-lingokatutubo-secret-key-change-me",
-)
-DEBUG = os.environ.get("DJANGO_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+DEBUG = os.environ.get("DJANGO_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "dev-only-lingokatutubo-secret-key-change-me"
+    else:
+        raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is disabled.")
 
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
-if DEBUG and "*" not in ALLOWED_HOSTS:
+ALLOW_DEBUG_WILDCARD_HOST = (
+    os.environ.get("DJANGO_ALLOW_DEBUG_WILDCARD_HOST", "0").lower()
+    in {"1", "true", "yes", "on"}
+)
+if DEBUG and ALLOW_DEBUG_WILDCARD_HOST and "*" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("*")
 
 
@@ -132,3 +138,11 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 LINGOKATUTUBO_MAX_UPLOAD_BYTES = int(
     os.environ.get("LINGOKATUTUBO_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))
 )
+LINGOKATUTUBO_TASK_MODE = os.environ.get("LINGOKATUTUBO_TASK_MODE", "thread")
+
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = "DENY"

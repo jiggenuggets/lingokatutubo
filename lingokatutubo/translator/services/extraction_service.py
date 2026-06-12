@@ -5,7 +5,7 @@ Text extraction service for digital PDFs and DOCX files
 import fitz  # PyMuPDF
 from docx import Document
 from typing import List, Dict, Any, Optional
-from models import TextSegment
+from .models import TextSegment
 
 
 class ExtractionService:

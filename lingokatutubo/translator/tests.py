@@ -1,6 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -8,7 +9,16 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from .models import TranslationJob
+from .models import (
+    DocumentPage,
+    GeneratedOutput,
+    OCRResult,
+    SystemEventLog,
+    TranslationJob,
+    TranslationSegment,
+    UploadedDocument,
+)
+from .services import sync_pipeline_job
 
 
 User = get_user_model()
@@ -102,8 +112,89 @@ class TranslatorAuthAndJobTests(TestCase):
             Path(job.input_file_path).relative_to(self.media_root).parts[:3],
             ("jobs", job.job_id, "input"),
         )
+        document = UploadedDocument.objects.get(job=job)
+        self.assertEqual(document.owner, self.alice)
+        self.assertEqual(document.original_filename, "sample.pdf")
+        self.assertEqual(document.file_size_bytes, uploaded.size)
+        self.assertEqual(document.metadata["content_type"], "application/pdf")
+        self.assertEqual(job.metadata["original_content_type"], "application/pdf")
         start_translation.assert_called_once()
         self.assertEqual(start_translation.call_args.args[0].id, job.id)
+
+    def test_processing_sync_saves_ocr_result_and_translation_segments(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        structure_path = self._write_job_file(
+            job,
+            "structure.json",
+            json.dumps(
+                {
+                    "warnings": [],
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "width": 612,
+                            "height": 792,
+                            "blocks": [
+                                {
+                                    "type": "text",
+                                    "block_id": "b1",
+                                    "bbox": [72, 72, 540, 110],
+                                    "ocr_confidence": 0.91,
+                                    "lines": [
+                                        {
+                                            "text": "Hello learner",
+                                            "translated_text": "Madigar learner",
+                                            "translation_method": "phrasebook_exact",
+                                            "translation_confidence": 0.95,
+                                            "ocr_confidence": 0.91,
+                                            "bbox": [72, 72, 540, 90],
+                                        },
+                                        {
+                                            "text": "Unlisted phrase",
+                                            "translated_text": "[UNKNOWN_FOR_REVIEW]",
+                                            "translation_method": "unknown_for_review",
+                                            "translation_confidence": 0.0,
+                                            "ocr_confidence": 0.81,
+                                            "bbox": [72, 94, 540, 110],
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+        )
+        sync_pipeline_job(
+            SimpleNamespace(
+                job_id=job.job_id,
+                status=TranslationJob.Status.COMPLETED,
+                progress=100,
+                current_phase="completed",
+                current_step="Completed",
+                phase_message="Translation complete.",
+                error="",
+                detection_type="digital",
+                file_type=TranslationJob.FileType.PDF,
+                metadata={"structure_file": str(structure_path)},
+                completed_at=None,
+            )
+        )
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.COMPLETED)
+        self.assertEqual(DocumentPage.objects.filter(job=job).count(), 1)
+        ocr = OCRResult.objects.get(job=job)
+        self.assertIn("Hello learner", ocr.text)
+        self.assertAlmostEqual(ocr.confidence, 0.8767)
+        self.assertEqual(TranslationSegment.objects.filter(job=job).count(), 2)
+        first = TranslationSegment.objects.get(job=job, segment_index=1)
+        self.assertEqual(first.source_text, "Hello learner")
+        self.assertEqual(first.translated_text, "Madigar learner")
+        self.assertEqual(first.method, "phrasebook_exact")
+        self.assertAlmostEqual(first.confidence, 0.95)
+        second = TranslationSegment.objects.get(job=job, segment_index=2)
+        self.assertTrue(second.needs_review)
 
     def test_owner_can_read_job_status(self):
         job = self._create_job(self.alice)
@@ -190,10 +281,203 @@ class TranslatorAuthAndJobTests(TestCase):
         )
         self.assertEqual(other_download_response.status_code, 404)
 
-    def _create_job(self, owner, status=TranslationJob.Status.QUEUED):
+    def test_history_shows_only_logged_in_users_jobs(self):
+        alice_job = self._create_job(
+            self.alice,
+            status=TranslationJob.Status.COMPLETED,
+            original_filename="alice.pdf",
+        )
+        bob_job = self._create_job(
+            self.bob,
+            status=TranslationJob.Status.COMPLETED,
+            original_filename="bob.pdf",
+        )
+        TranslationSegment.objects.create(
+            job=alice_job,
+            segment_index=1,
+            source_text="Alice original",
+            translated_text="Alice translated",
+            source_language="english",
+            target_language="tagabawa",
+            method="phrasebook_exact",
+            confidence=1.0,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn(alice_job.original_filename, body)
+        self.assertNotIn(bob_job.original_filename, body)
+
+    def test_preview_uses_database_translation_segments(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=1,
+            source_text="Original from database",
+            translated_text="Translated from database",
+            source_language="english",
+            target_language="tagabawa",
+            method="phrasebook_exact",
+            confidence=0.88,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("Original from database", body)
+        self.assertIn("Translated from database", body)
+        self.assertIn("phrasebook_exact", body)
+
+    def test_pending_job_hides_preview_and_download_buttons(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.QUEUED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertNotIn("Preview Bilingual", body)
+        self.assertNotIn("Download</a>", body)
+        self.assertIn("Processing is still running", body)
+
+    def test_processing_job_hides_preview_and_download_buttons(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn(job.original_filename, body)
+        self.assertNotIn("View Preview", body)
+        self.assertNotIn("Download", body)
+
+    def test_completed_job_shows_preview_without_download_when_output_missing(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("Preview Bilingual", body)
+        self.assertNotIn("Download</a>", body)
+
+    def test_completed_job_with_output_shows_download(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        output_path = self._write_job_file(
+            job,
+            "translated.pdf",
+            b"%PDF-1.4\n%%EOF",
+        )
+        job.output_file_path = str(output_path)
+        job.save(update_fields=["output_file_path"])
+        self.client.force_login(self.alice)
+
+        detail_response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        status_response = self.client.get(reverse("translator:status", args=[job.id]))
+
+        self.assertEqual(detail_response.status_code, 200)
+        body = detail_response.content.decode("utf-8")
+        self.assertIn("Preview Bilingual", body)
+        self.assertIn("Download</a>", body)
+        payload = status_response.json()
+        self.assertTrue(payload["can_preview"])
+        self.assertTrue(payload["can_download"])
+
+    def test_completed_job_with_generated_output_shows_download(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        output_path = self._write_job_file(
+            job,
+            "outputs",
+            "translated.pdf",
+            b"%PDF-1.4\n%%EOF",
+        )
+        GeneratedOutput.objects.create(
+            job=job,
+            output_type=GeneratedOutput.OutputType.TRANSLATED_PDF,
+            file_format="pdf",
+            file_path=str(output_path),
+            file_size_bytes=output_path.stat().st_size,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Download</a>", response.content.decode("utf-8"))
+
+    def test_failed_job_hides_preview_and_download_buttons(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.FAILED)
+        job.error = "OCR produced no text."
+        job.save(update_fields=["error"])
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertNotIn("Preview Bilingual", body)
+        self.assertNotIn("Download</a>", body)
+        self.assertIn("Translation failed safely", body)
+
+    def test_preview_before_completion_redirects_to_job_detail(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertRedirects(response, reverse("translator:job_detail", args=[job.id]))
+
+    def test_download_before_completion_redirects_to_job_detail(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_download", args=[job.id]))
+
+        self.assertRedirects(response, reverse("translator:job_detail", args=[job.id]))
+
+    def test_another_user_cannot_view_private_preview(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.bob)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_failed_processing_sync_saves_system_event_log(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        sync_pipeline_job(
+            SimpleNamespace(
+                job_id=job.job_id,
+                status=TranslationJob.Status.FAILED,
+                progress=25,
+                current_phase="ocr",
+                current_step="Translation failed",
+                phase_message="OCR produced no text.",
+                error="OCR produced no text.",
+                detection_type="scanned",
+                file_type=TranslationJob.FileType.PDF,
+                metadata={},
+                completed_at=None,
+            )
+        )
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.FAILED)
+        event = SystemEventLog.objects.get(job=job, event_type="translation_job_failed")
+        self.assertEqual(event.level, SystemEventLog.Level.ERROR)
+        self.assertIn("OCR produced no text", event.message)
+
+    def _create_job(self, owner, status=TranslationJob.Status.QUEUED, original_filename="sample.pdf"):
         return TranslationJob.objects.create(
             owner=owner,
-            original_filename="sample.pdf",
+            original_filename=original_filename,
             file_type=TranslationJob.FileType.PDF,
             status=status,
         )

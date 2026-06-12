@@ -1,7 +1,11 @@
+import zipfile
+from pathlib import Path
+
 from django import forms
 from django.conf import settings
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
+from PIL import Image, UnidentifiedImageError
 
 
 LANGUAGE_CHOICES = [
@@ -19,7 +23,19 @@ TARGET_LANGUAGE_CHOICES = [
     ("cebuano", "Cebuano"),
 ]
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".jpg", ".jpeg", ".png"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".jpg", ".jpeg", ".png", ".txt"}
+ALLOWED_CONTENT_TYPES = {
+    ".pdf": {"application/pdf", "application/x-pdf"},
+    ".docx": {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/zip",
+        "application/octet-stream",
+    },
+    ".jpg": {"image/jpeg", "application/octet-stream"},
+    ".jpeg": {"image/jpeg", "application/octet-stream"},
+    ".png": {"image/png", "application/octet-stream"},
+    ".txt": {"text/plain", "application/octet-stream"},
+}
 
 
 class DocumentUploadForm(forms.Form):
@@ -30,13 +46,60 @@ class DocumentUploadForm(forms.Form):
 
     def clean_file(self):
         uploaded = self.cleaned_data["file"]
-        name = uploaded.name.lower()
-        if not any(name.endswith(extension) for extension in ALLOWED_EXTENSIONS):
-            raise forms.ValidationError("Upload a PDF, DOCX, JPG, or PNG file.")
+        extension = Path(uploaded.name.lower()).suffix
+        if extension not in ALLOWED_EXTENSIONS:
+            raise forms.ValidationError("Upload a PDF, DOCX, JPG, PNG, or TXT file.")
         if uploaded.size > settings.LINGOKATUTUBO_MAX_UPLOAD_BYTES:
             max_mb = settings.LINGOKATUTUBO_MAX_UPLOAD_BYTES // (1024 * 1024)
             raise forms.ValidationError(f"File is too large. Maximum size is {max_mb} MB.")
+        content_type = (getattr(uploaded, "content_type", "") or "").lower()
+        allowed_types = ALLOWED_CONTENT_TYPES.get(extension, set())
+        if content_type and content_type not in allowed_types:
+            raise forms.ValidationError("The uploaded file type does not match its extension.")
+        self._validate_file_signature(uploaded, extension)
         return uploaded
+
+    def _validate_file_signature(self, uploaded, extension: str) -> None:
+        try:
+            uploaded.seek(0)
+            header = uploaded.read(8192)
+            uploaded.seek(0)
+        except Exception as exc:
+            raise forms.ValidationError("Could not inspect the uploaded file.") from exc
+
+        if extension == ".pdf":
+            if not header.startswith(b"%PDF-"):
+                raise forms.ValidationError("The uploaded PDF is not a valid PDF file.")
+            return
+
+        if extension == ".docx":
+            if not header.startswith(b"PK"):
+                raise forms.ValidationError("The uploaded DOCX is not a valid Office document.")
+            try:
+                with zipfile.ZipFile(uploaded) as archive:
+                    names = set(archive.namelist())
+                    if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                        raise forms.ValidationError("The uploaded DOCX is missing required document parts.")
+            except zipfile.BadZipFile as exc:
+                raise forms.ValidationError("The uploaded DOCX is not a valid ZIP package.") from exc
+            finally:
+                uploaded.seek(0)
+            return
+
+        if extension == ".txt":
+            try:
+                header.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise forms.ValidationError("The uploaded text file must be UTF-8 encoded.") from exc
+            return
+
+        try:
+            image = Image.open(uploaded)
+            image.verify()
+        except (UnidentifiedImageError, OSError) as exc:
+            raise forms.ValidationError("The uploaded image is not a valid image file.") from exc
+        finally:
+            uploaded.seek(0)
 
 
 class SignUpForm(UserCreationForm):

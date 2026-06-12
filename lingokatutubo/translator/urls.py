@@ -17,7 +17,10 @@ urlpatterns = [
     ),
     path("accounts/logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("translate/", views.translate, name="translate"),
-    path("translate/preview/<uuid:job_id>/", views.preview, name="preview"),
+    path("translate/history/", views.history, name="history"),
+    path("translate/job/<uuid:job_id>/", views.job_detail, name="job_detail"),
+    path("translate/job/<uuid:job_id>/preview/", views.preview, name="job_preview"),
+    path("translate/job/<uuid:job_id>/download/", views.download_job, name="job_download"),
     path("translate/upload/", views.api_translate, name="upload"),
     path("translate/status/<uuid:job_id>/", views.api_job_status, name="status"),
     path("translate/structure/<uuid:job_id>/", views.api_structure, name="structure"),
@@ -28,6 +31,7 @@ urlpatterns = [
         name="translate_preview_image",
     ),
     path("translate/download/<uuid:job_id>/", views.download_job, name="translate_download"),
+    path("translate/preview/<uuid:job_id>/", views.preview, name="preview"),
     path("health/", views.health, name="health"),
 
     # Compatibility aliases for earlier Next.js/FastAPI-style API calls.

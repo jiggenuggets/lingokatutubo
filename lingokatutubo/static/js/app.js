@@ -101,6 +101,11 @@
       const phase = normalizeStatus(data.current_phase || data.status || "queued");
       const percent = progressFor(data);
       progressCard.hidden = false;
+      if (normalizeStatus(data.status) !== "completed") {
+        completeActions.hidden = true;
+        downloadLink.hidden = true;
+        previewLink.hidden = true;
+      }
       progressTitle.textContent = phaseLabels[phase] || data.current_step || "Processing";
       progressMessage.textContent = data.phase_message || data.message || phaseLabels[phase] || "";
       progressPercent.textContent = `${percent}%`;
@@ -139,17 +144,22 @@
           const status = normalizeStatus(data.status);
           if (status === "completed") {
             clearPoll();
-            button.disabled = false;
-            button.textContent = "Start Translation";
-            completeActions.hidden = false;
-            downloadLink.href = `${form.dataset.downloadBase}${jobId}/`;
-            previewLink.href = `${form.dataset.previewBase}${jobId}/`;
+            button.disabled = true;
+            button.textContent = "Completed";
+            previewLink.hidden = !data.can_preview;
+            downloadLink.hidden = !data.can_download;
+            previewLink.href = `${form.dataset.previewBase}${jobId}/preview/`;
+            downloadLink.href = `${form.dataset.downloadBase}${jobId}/download/`;
+            completeActions.hidden = !(data.can_preview || data.can_download);
             return;
           }
           if (status === "failed") {
             clearPoll();
             button.disabled = false;
             button.textContent = "Start Translation";
+            completeActions.hidden = true;
+            downloadLink.hidden = true;
+            previewLink.hidden = true;
             setError(data.error || data.message || "Translation failed.");
             return;
           }
@@ -164,11 +174,13 @@
     function updateSelectedFile() {
       const file = fileInput.files && fileInput.files[0];
       completeActions.hidden = true;
+      downloadLink.hidden = true;
+      previewLink.hidden = true;
       detectedLanguage.hidden = true;
       setError("");
       if (!file) {
         fileName.textContent = "Drop your document here";
-        fileMeta.textContent = "PDF, DOCX, JPG, or PNG up to 50 MB";
+        fileMeta.textContent = "PDF, DOCX, JPG, PNG, or TXT up to 50 MB";
         readyMessage.hidden = true;
         button.disabled = true;
         return;
@@ -206,6 +218,8 @@
       clearPoll();
       setError("");
       completeActions.hidden = true;
+      downloadLink.hidden = true;
+      previewLink.hidden = true;
       detectedLanguage.hidden = true;
       button.disabled = true;
       button.textContent = "Uploading...";
@@ -270,6 +284,8 @@
     const warningBox = document.getElementById("structure-warnings");
     const detailsPanel = document.querySelector(".translation-details");
     const detailsSummary = detailsPanel ? detailsPanel.querySelector("summary") : null;
+
+    if (!content || !loading || !errorBox || !originalImage || !translatedImage) return;
 
     let preview = null;
     let structure = null;

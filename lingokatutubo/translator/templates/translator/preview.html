@@ -9,47 +9,190 @@
   data-job-id="{{ job.job_id }}"
   data-preview-url="{% url 'translator:preview_data' job.id %}"
   data-structure-url="{% url 'translator:structure' job.id %}"
-  data-download-url="{% url 'translator:translate_download' job.id %}"
+  data-download-url="{% url 'translator:job_download' job.id %}"
 >
   <header class="preview-header">
     <div>
-      <a class="back-link" href="{% url 'translator:translate' %}">Back to Translate</a>
+      <a class="back-link" href="{% url 'translator:history' %}">Back to History</a>
       <h1>Bilingual Preview</h1>
-      <p>Job {{ job.job_id|slice:":8" }} - {{ job.original_filename }}</p>
+      <p>{{ uploaded_document.original_filename|default:job.original_filename }}</p>
     </div>
-    <a id="preview-download" class="button primary" href="{% url 'translator:translate_download' job.id %}">Download</a>
+    <div class="hero-actions">
+      {% if can_download %}
+        <a id="preview-download" class="button primary" href="{% url 'translator:job_download' job.id %}">Download Translated PDF</a>
+      {% endif %}
+    </div>
   </header>
 
-  <div id="preview-error" class="alert error" hidden></div>
-  <div id="preview-loading" class="loading-panel">Loading preview...</div>
+  <section class="preview-layout">
+    <aside class="preview-pages-panel">
+      <h2>Document Preview</h2>
+      <div class="document-thumb large {{ file_icon_class }}">
+        {% if thumbnail_url %}
+          <img src="{{ thumbnail_url }}" alt="{{ uploaded_document.original_filename|default:job.original_filename }} preview">
+        {% else %}
+          <span>{{ thumbnail_label }}</span>
+        {% endif %}
+      </div>
 
-  <section id="preview-content" hidden>
-    <div class="pager">
-      <div>
-        <button id="previous-page" type="button">Previous</button>
-        <button id="next-page" type="button">Next</button>
-      </div>
-      <p>Page <strong id="current-page">1</strong> of <strong id="page-count">1</strong></p>
-    </div>
+      {% if image_preview.original_pages %}
+        <div class="page-thumb-list">
+          {% for page_url in image_preview.original_pages %}
+            <a href="{{ page_url }}" target="_blank" rel="noopener">
+              <img src="{{ page_url }}" alt="Page {{ forloop.counter }} preview">
+              <span>Page {{ forloop.counter }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% elif document_pages %}
+        <ol class="page-list">
+          {% for page in document_pages %}
+            <li>Page {{ page.page_number }}</li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <p class="muted">No image preview is available yet.</p>
+      {% endif %}
+    </aside>
 
-    <section class="side-by-side">
-      <div>
-        <h2>Original</h2>
-        <img id="original-image" alt="Original page preview">
-        <p id="original-empty" class="empty-preview" hidden>No original preview for this page.</p>
+    <section class="bilingual-panel">
+      <div class="section-title-row">
+        <h2>Aligned Text</h2>
+        <span>{{ segments|length }} segment{{ segments|length|pluralize }}</span>
       </div>
-      <div>
-        <h2>Translated</h2>
-        <img id="translated-image" alt="Translated page preview">
-        <p id="translated-empty" class="empty-preview" hidden>No translated preview for this page.</p>
-      </div>
+      {% if segments %}
+        <div class="segment-table">
+          <div class="segment-head">#</div>
+          <div class="segment-head">Original Text</div>
+          <div class="segment-head">Translated Text</div>
+          <div class="segment-head">Method</div>
+          {% for segment in segments %}
+            <div class="segment-index">{{ segment.segment_index }}</div>
+            <div>
+              {% if segment.page %}
+                <small>Page {{ segment.page.page_number }}</small>
+              {% endif %}
+              <p>{{ segment.source_text }}</p>
+            </div>
+            <div>
+              <p class="{% if segment.needs_review %}needs-review{% endif %}">
+                {{ segment.translated_text|default:"[UNKNOWN_FOR_REVIEW]" }}
+              </p>
+              {% if segment.needs_review %}
+                <small class="needs-review">Unknown word or phrase needs review.</small>
+              {% endif %}
+            </div>
+            <div>
+              <small>{{ segment.method|default:"unknown" }}</small>
+              {% if segment.confidence is not None %}
+                <p>{{ segment.confidence|floatformat:2 }}</p>
+              {% else %}
+                <p>n/a</p>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">Translation segments are not available yet.</p>
+      {% endif %}
+
+      {% if ocr_summary.warnings %}
+        <section class="warning-box">
+          <strong>OCR and extraction warnings</strong>
+          {% for warning in ocr_summary.warnings %}
+            <p>{{ warning }}</p>
+          {% endfor %}
+        </section>
+      {% endif %}
     </section>
 
-    <details class="translation-details">
-      <summary>Translation Details</summary>
-      <div id="details-list"></div>
-      <div id="structure-warnings" class="warning-box" hidden></div>
-    </details>
+    <aside class="preview-info-panel">
+      <h2>Document Information</h2>
+      <dl class="document-meta-grid single">
+        <div>
+          <dt>Filename</dt>
+          <dd>{{ uploaded_document.original_filename|default:job.original_filename }}</dd>
+        </div>
+        <div>
+          <dt>Uploaded</dt>
+          <dd>{% if uploaded_document %}{{ uploaded_document.created_at|date:"M j, Y H:i" }}{% else %}{{ job.created_at|date:"M j, Y H:i" }}{% endif %}</dd>
+        </div>
+        <div>
+          <dt>Completed</dt>
+          <dd>{% if job.completed_at %}{{ job.completed_at|date:"M j, Y H:i" }}{% else %}Not completed{% endif %}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd><span class="status-pill {{ status_class }}">{{ status_label }}</span></dd>
+        </div>
+        <div>
+          <dt>Language Pair</dt>
+          <dd>{{ job.source_language }} to {{ job.target_language }}</dd>
+        </div>
+        <div>
+          <dt>OCR Confidence</dt>
+          <dd>{% if ocr_summary.confidence is not None %}{{ ocr_summary.confidence|floatformat:2 }}{% else %}OCR result not available yet{% endif %}</dd>
+        </div>
+        <div>
+          <dt>Total Pages</dt>
+          <dd>{{ document_pages|length }}</dd>
+        </div>
+        <div>
+          <dt>Total Segments</dt>
+          <dd>{{ segments|length }}</dd>
+        </div>
+        <div>
+          <dt>Outputs</dt>
+          <dd>{{ generated_outputs|length }}</dd>
+        </div>
+      </dl>
+
+      {% if has_failed %}
+        <div class="alert error">{{ failure_message }}</div>
+      {% endif %}
+
+      <div class="complete-actions">
+        {% if can_preview %}
+          <a class="button secondary full" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+        {% endif %}
+        {% if can_download %}
+          <a class="button primary full" href="{% url 'translator:job_download' job.id %}">Download Translated PDF</a>
+        {% endif %}
+      </div>
+    </aside>
   </section>
+
+  {% if image_preview.page_count %}
+    <section id="preview-content" class="image-preview-panel">
+      <div class="pager">
+        <div>
+          <button id="previous-page" type="button">Previous</button>
+          <button id="next-page" type="button">Next</button>
+        </div>
+        <p>Page <strong id="current-page">1</strong> of <strong id="page-count">{{ image_preview.page_count }}</strong></p>
+      </div>
+
+      <section class="side-by-side">
+        <div>
+          <h2>Original Page Image</h2>
+          <img id="original-image" alt="Original page preview">
+          <p id="original-empty" class="empty-preview" hidden>No original preview for this page.</p>
+        </div>
+        <div>
+          <h2>Translated Page Image</h2>
+          <img id="translated-image" alt="Translated page preview">
+          <p id="translated-empty" class="empty-preview" hidden>No translated preview for this page.</p>
+        </div>
+      </section>
+
+      <details class="translation-details">
+        <summary>Layout Warnings</summary>
+        <div id="details-list" hidden></div>
+        <div id="structure-warnings" class="warning-box" hidden></div>
+      </details>
+    </section>
+    <div id="preview-loading" class="loading-panel" hidden>Loading preview...</div>
+    <div id="preview-error" class="alert error" hidden></div>
+  {% endif %}
 </main>
 {% endblock %}

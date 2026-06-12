@@ -1,0 +1,94 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Translation History{% endblock %}
+
+{% block content %}
+<main class="translator-page">
+  <header class="page-heading compact">
+    <h1>Translation History</h1>
+    <p>Your uploaded documents, processing status, OCR confidence, bilingual previews, and outputs.</p>
+  </header>
+
+  <form class="history-filters" method="get">
+    <label>
+      <span>Search</span>
+      <input type="search" name="q" value="{{ search_query }}" placeholder="Search by filename">
+    </label>
+    <label>
+      <span>Status</span>
+      <select name="status">
+        <option value="">All statuses</option>
+        {% for value, label in filters %}
+          <option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="button secondary" type="submit">Apply</button>
+    {% if search_query or selected_status %}
+      <a class="button secondary" href="{% url 'translator:history' %}">Clear</a>
+    {% endif %}
+  </form>
+
+  <section class="history-grid" aria-label="Document history">
+    {% if jobs %}
+      {% for state in jobs %}
+        {% with job=state.job %}
+          <article class="document-card history-card">
+            <div class="document-thumb {{ state.file_icon_class }}">
+              {% if state.thumbnail_url %}
+                <img src="{{ state.thumbnail_url }}" alt="{{ state.document_title }} preview">
+              {% else %}
+                <span>{{ state.thumbnail_label }}</span>
+              {% endif %}
+            </div>
+            <div class="document-card-body">
+              <div class="document-card-top">
+                <h2>{{ state.document_title }}</h2>
+                <span class="status-pill {{ state.status_class }}">{{ state.status_label }}</span>
+              </div>
+              <dl class="document-meta-grid">
+                <div>
+                  <dt>Uploaded</dt>
+                  <dd>{{ state.uploaded_at|date:"M j, Y H:i" }}</dd>
+                </div>
+                <div>
+                  <dt>Completed</dt>
+                  <dd>{% if state.completed_at %}{{ state.completed_at|date:"M j, Y H:i" }}{% else %}Not completed{% endif %}</dd>
+                </div>
+                <div>
+                  <dt>Language Pair</dt>
+                  <dd>{{ job.source_language }} to {{ job.target_language }}</dd>
+                </div>
+                <div>
+                  <dt>OCR Confidence</dt>
+                  <dd>{% if state.ocr_confidence is not None %}{{ state.ocr_confidence|floatformat:2 }}{% else %}OCR result not available yet{% endif %}</dd>
+                </div>
+                <div>
+                  <dt>Segments</dt>
+                  <dd>{{ state.segment_count }}</dd>
+                </div>
+              </dl>
+              {% if state.has_failed %}
+                <p class="inline-error">{{ state.failure_message }}</p>
+              {% endif %}
+              <div class="history-actions">
+                {% if state.can_preview %}
+                  <a class="button secondary" href="{% url 'translator:job_preview' job.id %}">View Preview</a>
+                {% endif %}
+                {% if state.can_download %}
+                  <a class="button primary" href="{% url 'translator:job_download' job.id %}">Download</a>
+                {% endif %}
+                {% if not state.can_preview %}
+                  <a class="button secondary" href="{% url 'translator:job_detail' job.id %}">Details</a>
+                {% endif %}
+              </div>
+            </div>
+          </article>
+        {% endwith %}
+      {% endfor %}
+    {% else %}
+      <p class="muted">No matching documents found.</p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

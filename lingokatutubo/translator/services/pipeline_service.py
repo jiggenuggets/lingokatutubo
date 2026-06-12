@@ -5,20 +5,19 @@ Orchestrates the entire translation workflow
 
 import asyncio
 import os
+import re
 from typing import Optional, Dict, Any, Callable, List, Sequence, Union
 from datetime import datetime
 import json
-import sys
-from pathlib import Path
 
-from models import FileType, DetectionType
-from file_service import get_file_service
-from detection_service import get_detection_service
-from extraction_service import get_extraction_service
-from reconstruction_service import get_reconstruction_service
-from translation_dataset import UNKNOWN_FOR_REVIEW, get_translation_dataset
-from language_detection_service import get_language_detection_service
-from ocr_stage import OCRUnavailableError, get_ocr_service
+from .models import FileType, DetectionType
+from .file_service import get_file_service
+from .detection_service import get_detection_service
+from .extraction_service import get_extraction_service
+from .reconstruction_service import get_reconstruction_service
+from .translation_dataset import UNKNOWN_FOR_REVIEW, get_translation_dataset
+from .language_detection_service import get_language_detection_service
+from .ocr_stage import OCRUnavailableError, get_ocr_service
 
 
 PIPELINE_PHASES = {
@@ -111,10 +110,11 @@ class PipelineService:
         self.job_update_callback = callback
 
     def _persist_job(self, job: JobStatus) -> None:
-        if not self.job_update_callback:
+        callback = getattr(self, "job_update_callback", None)
+        if not callback:
             return
         try:
-            self.job_update_callback(job)
+            callback(job)
         except Exception as exc:
             print(f"[Pipeline] Job persistence callback failed: {exc}")
 
@@ -123,13 +123,9 @@ class PipelineService:
         """
         Run OCR from the OCR stage module for scanned/image input.
         """
-        project_root = Path(__file__).resolve().parents[1]
-        if str(project_root) not in sys.path:
-            sys.path.append(str(project_root))
+        from .ocr_stage.ocr_service import get_ocr_service
 
-        from ocr_stage.services.ocr_service import run_ocr
-
-        return run_ocr(input_file_path)
+        return get_ocr_service().extract_image_text_and_layout(input_file_path)
 
     def _set_job_phase(self, job: JobStatus, phase: str) -> None:
         phase_info = PIPELINE_PHASES.get(phase, PIPELINE_PHASES["queued"])
@@ -180,7 +176,9 @@ class PipelineService:
             # Phase 1: Detect file type (digital vs scanned)
             print(f"[Pipeline] Phase 1: Detecting file type for {job_id}")
             
-            if file_type == FileType.PDF:
+            if file_type == FileType.TXT:
+                job.detection_type = DetectionType.DIGITAL
+            elif file_type == FileType.PDF:
                 job.detection_type = self.detection_service.detect_pdf_type(input_file_path)
             elif file_type == FileType.DOCX:
                 job.detection_type = self.detection_service.detect_docx_type(input_file_path)
@@ -207,6 +205,8 @@ class PipelineService:
                     layout_data = self.extraction_service.extract_pdf_text_and_layout(input_file_path)
                 elif file_type == FileType.DOCX:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
+                elif file_type == FileType.TXT:
+                    layout_data = self._extract_txt_text_and_layout(input_file_path)
             else:
                 # Scanned input: route through Tesseract OCR. No mock fallback.
                 self._set_job_phase(job, "ocr")
@@ -387,12 +387,25 @@ class PipelineService:
             # Cap at 20 pages to keep preview generation bounded for large PDFs.
             # The /preview endpoint reports every generated page, so the
             # frontend viewer can paginate up to this limit.
-            original_previews = self.reconstruction_service.create_preview_images(
-                input_file_path, preview_dir, max_pages=20, prefix="original"
-            )
-            translated_previews = self.reconstruction_service.create_preview_images(
-                output_pdf_path, preview_dir, max_pages=20, prefix="translated"
-            )
+            original_previews = []
+            translated_previews = []
+            try:
+                original_preview_source = input_file_path if file_type == FileType.PDF else output_pdf_path
+                original_previews = self.reconstruction_service.create_preview_images(
+                    original_preview_source, preview_dir, max_pages=20, prefix="original"
+                )
+            except Exception as exc:
+                job.metadata.setdefault("preview_warnings", []).append(
+                    f"Original preview image generation failed: {exc}"
+                )
+            try:
+                translated_previews = self.reconstruction_service.create_preview_images(
+                    output_pdf_path, preview_dir, max_pages=20, prefix="translated"
+                )
+            except Exception as exc:
+                job.metadata.setdefault("preview_warnings", []).append(
+                    f"Translated preview image generation failed: {exc}"
+                )
             
             job.metadata["preview_original"] = original_previews
             job.metadata["preview_translated"] = translated_previews
@@ -511,6 +524,51 @@ class PipelineService:
                     translations[block_id] = record
         
         return translations
+
+    @staticmethod
+    def _extract_txt_text_and_layout(txt_path: str) -> List[Dict[str, Any]]:
+        """Represent a UTF-8 text file as one simple page of paragraph lines."""
+        with open(txt_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+
+        paragraphs = [
+            paragraph.strip()
+            for paragraph in re.split(r"\n\s*\n", text)
+            if paragraph.strip()
+        ]
+        if not paragraphs and text.strip():
+            paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+
+        y = 72.0
+        lines = []
+        for index, paragraph in enumerate(paragraphs):
+            height = max(24.0, min(120.0, 16.0 + len(paragraph) / 4.0))
+            lines.append(
+                {
+                    "text": paragraph,
+                    "bbox": [72.0, y, 540.0, y + height],
+                    "font": "helv",
+                    "size": 12,
+                    "block_id": f"txt_0_{index}",
+                }
+            )
+            y += height + 12.0
+
+        return [
+            {
+                "page": 0,
+                "width": 612.0,
+                "height": max(792.0, y + 72.0),
+                "rotation": 0,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [72.0, 72.0, 540.0, max(96.0, y)],
+                        "lines": lines,
+                    }
+                ],
+            }
+        ]
     
     # ------------------------------------------------------------------
     # Structure JSON (consumed by GET /structure/{job_id})

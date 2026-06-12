@@ -1,0 +1,97 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Translation Job{% endblock %}
+
+{% block content %}
+<main class="translator-page">
+  <header class="page-heading compact">
+    <h1>{{ document_title }}</h1>
+    <p>{{ job.source_language }} to {{ job.target_language }}</p>
+  </header>
+
+  <section class="job-detail-layout">
+    <div class="document-thumb large {{ file_icon_class }}">
+      {% if thumbnail_url %}
+        <img src="{{ thumbnail_url }}" alt="{{ document_title }} preview">
+      {% else %}
+        <span>{{ thumbnail_label }}</span>
+      {% endif %}
+    </div>
+
+    <section class="translation-details">
+      <p>
+        <strong>Status:</strong>
+        <span class="status-pill {{ status_class }}">{{ status_label }}</span>
+      </p>
+
+      <p>
+        <strong>Current step:</strong>
+        {% if has_failed %}
+          Failed during processing
+        {% else %}
+          {{ job.current_step|default:"Queued for processing" }}
+        {% endif %}
+      </p>
+
+      <p>
+        <strong>Message:</strong>
+        {% if has_failed %}
+          Translation failed safely
+        {% else %}
+          {{ job.phase_message|default:"No message available." }}
+        {% endif %}
+      </p>
+
+      <p><strong>Uploaded:</strong> {{ uploaded_at|date:"M j, Y H:i" }}</p>
+
+      <p>
+        <strong>Completed:</strong>
+        {% if completed_at %}
+          {{ completed_at|date:"M j, Y H:i" }}
+        {% else %}
+          Not completed
+        {% endif %}
+      </p>
+
+      <p>
+        <strong>OCR confidence:</strong>
+        {% if ocr_confidence is not None %}
+          {{ ocr_confidence|floatformat:2 }}
+        {% else %}
+          OCR result not available yet
+        {% endif %}
+      </p>
+
+      <p><strong>Segments:</strong> {{ segment_count }}</p>
+
+      {% if has_failed and failure_message %}
+        <div class="alert error">
+          {{ failure_message }}
+        </div>
+      {% endif %}
+
+      {% if is_processing %}
+        <div class="alert success">
+          Processing is still running. Preview and download will appear when the translated output is ready.
+        </div>
+      {% endif %}
+
+      <div class="hero-actions">
+        <a class="button secondary" href="{% url 'translator:history' %}">History</a>
+
+        {% if can_preview %}
+          <a class="button primary" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+        {% endif %}
+
+        {% if can_download %}
+          <a class="button secondary" href="{% url 'translator:job_download' job.id %}">Download</a>
+        {% endif %}
+
+        {% if can_retry %}
+          <button class="button secondary" type="button">Retry Translation</button>
+        {% endif %}
+      </div>
+    </section>
+  </section>
+</main>
+{% endblock %}

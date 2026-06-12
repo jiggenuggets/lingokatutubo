@@ -1,63 +1,55 @@
 import asyncio
-import importlib
+import json
 import os
-import sys
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
 
-from translator.models import TranslationJob
+from translator.models import (
+    DocumentPage,
+    GeneratedOutput,
+    OCRResult,
+    SystemEventLog,
+    TranslationJob,
+    TranslationSegment,
+)
 
+from . import file_service as file_service_module
+from .models import FileType
+from .pipeline_service import get_pipeline_service
+from .task_runner import submit_translation_task
+from .translation_dataset import get_translation_dataset
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SERVICES_DIR = Path(__file__).resolve().parent
-
-
-_MAX_WORKERS = int(os.environ.get("TRANSLATION_WORKERS", "2"))
-_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, _MAX_WORKERS))
 _CALLBACK_REGISTERED = False
 
 
-def _ensure_services_path() -> None:
-    if str(SERVICES_DIR) not in sys.path:
-        sys.path.insert(0, str(SERVICES_DIR))
-
-
-def _service_module(module_name: str):
-    _ensure_services_path()
-    return importlib.import_module(module_name)
-
-
 def _get_file_service():
-    module = _service_module("file_service")
-    current = getattr(module, "_file_service", None)
+    current = getattr(file_service_module, "_file_service", None)
     media_root = str(settings.MEDIA_ROOT)
     if (
         current is None
         or getattr(current, "storage_layout", "") != "django"
         or str(getattr(current, "upload_dir", "")) != media_root
     ):
-        module._file_service = module.FileService(
+        file_service_module._file_service = file_service_module.FileService(
             upload_dir=media_root,
             storage_layout="django",
         )
-    return module._file_service
+    return file_service_module._file_service
 
 
 def _get_file_type_enum():
-    return _service_module("models").FileType
+    return FileType
 
 
 def _get_pipeline_service():
-    return _service_module("pipeline_service").get_pipeline_service()
+    return get_pipeline_service()
 
 
 def _get_translation_dataset():
-    return _service_module("translation_dataset").get_translation_dataset()
+    return get_translation_dataset()
 
 
 def _enum_value(value: Any) -> str:
@@ -123,6 +115,11 @@ def sync_pipeline_job(pipeline_job) -> None:
         updates["completed_at"] = timezone.make_aware(completed_at) if timezone.is_naive(completed_at) else completed_at
 
     TranslationJob.objects.filter(id=job_id).update(**updates)
+    if updates["status"] == TranslationJob.Status.FAILED:
+        _log_failed_job(job_id, updates["error"] or updates["phase_message"])
+    _sync_generated_outputs(job_id, paths)
+    if paths.get("structure_file_path"):
+        _sync_structure_models(job_id, paths["structure_file_path"])
 
 
 def register_pipeline_callback() -> None:
@@ -136,11 +133,11 @@ def register_pipeline_callback() -> None:
 def start_translation_job(job: TranslationJob) -> None:
     register_pipeline_callback()
     file_type = _get_file_type_enum()(job.file_type)
-    _EXECUTOR.submit(
+    submit_translation_task(
         _run_translation_job,
         job.job_id,
         job.input_file_path,
-        file_type,
+        file_type.value,
         job.source_language,
         job.target_language,
         job.ocr_languages or None,
@@ -158,11 +155,16 @@ def _run_translation_job(
     close_old_connections()
     try:
         register_pipeline_callback()
+        file_type_enum = (
+            file_type
+            if isinstance(file_type, _get_file_type_enum())
+            else _get_file_type_enum()(file_type)
+        )
         asyncio.run(
             _get_pipeline_service().process_translation(
                 job_id=job_id,
                 input_file_path=input_file_path,
-                file_type=file_type,
+                file_type=file_type_enum,
                 source_language=source_language,
                 target_language=target_language,
                 ocr_languages=ocr_languages,
@@ -176,6 +178,7 @@ def _run_translation_job(
             current_step="Translation failed",
             updated_at=timezone.now(),
         )
+        _log_failed_job(job_id, str(exc))
     finally:
         close_old_connections()
 
@@ -190,7 +193,7 @@ def quick_translate_text(
     detection_confidence = None
 
     if source_language == "auto":
-        from language_detection_service import get_language_detection_service
+        from .language_detection_service import get_language_detection_service
 
         detection = get_language_detection_service(dataset).detect_language(text)
         detected_language = detection["language"]
@@ -221,3 +224,184 @@ def job_directory_path(job_id: str) -> str:
 
 def job_structure_path(job_id: str) -> str:
     return os.path.join(job_directory_path(job_id), "structure.json")
+
+
+def _sync_generated_outputs(job_id: str, paths: Dict[str, str]) -> None:
+    try:
+        job = TranslationJob.objects.get(id=job_id)
+    except TranslationJob.DoesNotExist:
+        return
+
+    output_map = {
+        "output_file_path": GeneratedOutput.OutputType.TRANSLATED_PDF,
+        "bilingual_file_path": GeneratedOutput.OutputType.BILINGUAL_ALTERNATING,
+        "structure_file_path": GeneratedOutput.OutputType.STRUCTURE_JSON,
+    }
+    for path_key, output_type in output_map.items():
+        path = paths.get(path_key)
+        if not path or not os.path.exists(path):
+            continue
+        _, ext = os.path.splitext(path)
+        GeneratedOutput.objects.update_or_create(
+            job=job,
+            output_type=output_type,
+            file_path=path,
+            defaults={
+                "file_format": ext.lstrip(".").lower() or "json",
+                "file_size_bytes": os.path.getsize(path),
+            },
+        )
+
+
+def _sync_structure_models(job_id: str, structure_path: str) -> None:
+    try:
+        job = TranslationJob.objects.get(id=job_id)
+    except TranslationJob.DoesNotExist:
+        return
+    try:
+        with open(structure_path, "r", encoding="utf-8") as handle:
+            structure = json.load(handle)
+    except Exception as exc:
+        SystemEventLog.objects.create(
+            job=job,
+            level=SystemEventLog.Level.WARNING,
+            event_type="structure_sync_failed",
+            message=f"Could not sync structure.json: {exc}",
+        )
+        return
+
+    seen_pages = set()
+    segment_index = 0
+    for page_data in structure.get("pages", []):
+        page_number = int(page_data.get("page_number") or page_data.get("page") or 0) or 1
+        seen_pages.add(page_number)
+        page, _ = DocumentPage.objects.update_or_create(
+            job=job,
+            page_number=page_number,
+            defaults={
+                "width": page_data.get("width"),
+                "height": page_data.get("height"),
+                "rotation": int(page_data.get("rotation") or 0),
+                "extracted_text": _page_text(page_data),
+                "metadata": {
+                    "detected_type": structure.get("detected_type"),
+                    "warnings": structure.get("warnings", []),
+                },
+            },
+        )
+        _sync_page_ocr(job, page, page_data)
+        for block in page_data.get("blocks", []):
+            if block.get("type") != "text" and block.get("block_type") != "text":
+                continue
+            lines = block.get("lines") or [
+                {
+                    "source_text": block.get("source_text"),
+                    "translated_text": block.get("translated_text"),
+                    "translation_method": block.get("translation_method"),
+                    "translation_confidence": block.get("translation_confidence"),
+                    "bbox": block.get("bbox"),
+                }
+            ]
+            for line in lines:
+                source_text = (line.get("source_text") or line.get("text") or "").strip()
+                if not source_text:
+                    continue
+                translated_text = (line.get("translated_text") or "").strip()
+                method = line.get("translation_method") or line.get("cascade_stage") or ""
+                confidence = _coerce_float(line.get("translation_confidence"))
+                segment_index += 1
+                TranslationSegment.objects.update_or_create(
+                    job=job,
+                    segment_index=segment_index,
+                    defaults={
+                        "page": page,
+                        "source_text": source_text,
+                        "translated_text": translated_text,
+                        "source_language": job.source_language,
+                        "target_language": job.target_language,
+                        "method": method,
+                        "confidence": confidence,
+                        "needs_review": (
+                            not translated_text
+                            or translated_text == "[UNKNOWN_FOR_REVIEW]"
+                            or "UNKNOWN_FOR_REVIEW" in translated_text
+                            or method == "unknown_for_review"
+                        ),
+                        "bbox": line.get("bbox") or block.get("bbox") or [],
+                        "metadata": {
+                            "block_id": block.get("block_id"),
+                            "ocr_confidence": line.get("ocr_confidence") or block.get("ocr_confidence"),
+                        },
+                    },
+                )
+    if seen_pages:
+        DocumentPage.objects.filter(job=job).exclude(page_number__in=seen_pages).delete()
+    TranslationSegment.objects.filter(job=job, segment_index__gt=segment_index).delete()
+
+
+def _sync_page_ocr(job: TranslationJob, page: DocumentPage, page_data: Dict[str, Any]) -> None:
+    confidences = []
+    for block in page_data.get("blocks", []):
+        value = block.get("ocr_confidence")
+        if isinstance(value, (int, float)):
+            confidences.append(float(value))
+        for line in block.get("lines", []):
+            value = line.get("ocr_confidence")
+            if isinstance(value, (int, float)):
+                confidences.append(float(value))
+    confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
+    engine = "tesseract" if confidences else "text_extraction"
+    OCRResult.objects.update_or_create(
+        job=job,
+        page=page,
+        engine=engine,
+        defaults={
+            "language_codes": job.ocr_languages,
+            "text": page.extracted_text,
+            "confidence": confidence,
+            "status": OCRResult.Status.PENDING_REVIEW if confidences else OCRResult.Status.ACCEPTED,
+            "warnings": page_data.get("warnings", []) or page.metadata.get("warnings", []),
+            "raw_data": page_data,
+        },
+    )
+
+
+def _page_text(page_data: Dict[str, Any]) -> str:
+    lines = []
+    for block in page_data.get("blocks", []):
+        if block.get("type") != "text" and block.get("block_type") != "text":
+            continue
+        for line in block.get("lines", []):
+            text = (line.get("source_text") or line.get("text") or "").strip()
+            if text:
+                lines.append(text)
+    return "\n".join(lines)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_failed_job(job_id: str, message: str) -> None:
+    try:
+        job = TranslationJob.objects.get(id=job_id)
+    except TranslationJob.DoesNotExist:
+        return
+    if SystemEventLog.objects.filter(
+        job=job,
+        event_type="translation_job_failed",
+        message=message or "Translation job failed.",
+    ).exists():
+        return
+    SystemEventLog.objects.create(
+        actor=job.owner,
+        job=job,
+        level=SystemEventLog.Level.ERROR,
+        event_type="translation_job_failed",
+        message=message or "Translation job failed.",
+    )

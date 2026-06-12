@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from models import FileType
+from .models import FileType
 
 
 class FileService:
@@ -290,6 +290,7 @@ class FileService:
             '.jpg': FileType.JPG,
             '.jpeg': FileType.JPG,
             '.png': FileType.PNG,
+            '.txt': FileType.TXT,
         }
         return ext_map.get(ext)
     

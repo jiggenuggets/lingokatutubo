@@ -6,7 +6,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 import numpy as np
 from typing import Tuple
-from models import DetectionType, FileType
+from .models import DetectionType, FileType
 
 
 class DetectionService:

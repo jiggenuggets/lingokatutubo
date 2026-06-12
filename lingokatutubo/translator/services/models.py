@@ -12,6 +12,7 @@ class FileType(str, Enum):
     DOCX = "docx"
     JPG = "jpg"
     PNG = "png"
+    TXT = "txt"
 
 
 class DetectionType(str, Enum):
