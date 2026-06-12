@@ -232,6 +232,31 @@ def preview(request, job_id):
 @login_required
 @require_POST
 def api_translate(request):
+    print("DONT ENFORCE CSRF:", getattr(request, '_dont_enforce_csrf_checks', None))
+    # 1. Active jobs limit check (Maximum 2 queued/processing jobs per user)
+    active_jobs = TranslationJob.objects.filter(
+        owner=request.user,
+        status__in=[TranslationJob.Status.QUEUED, TranslationJob.Status.PROCESSING],
+        is_deleted=False
+    ).count()
+    if active_jobs >= 2:
+        return JsonResponse(
+            {"detail": "You have reached the upload limit. Please wait before submitting another document."},
+            status=400
+        )
+
+    # 2. Hourly upload attempts check (Maximum 5 attempts per hour)
+    from django.core.cache import cache
+    cache_key = f"upload_attempts_hourly_{request.user.id}"
+    attempts = cache.get(cache_key, 0)
+    if attempts >= 5:
+        return JsonResponse(
+            {"detail": "You have reached the upload limit. Please wait before submitting another document."},
+            status=400
+        )
+    # Increment counter
+    cache.set(cache_key, attempts + 1, timeout=3600)
+
     form = DocumentUploadForm(request.POST, request.FILES)
 
     if not form.is_valid():
@@ -488,12 +513,64 @@ def health(request):
     )
 
 
+@login_required
+def confirm_delete_job(request, job_id):
+    """GET — show a confirmation page before soft-deleting a job."""
+    job = get_object_or_404(
+        TranslationJob.objects.filter(is_deleted=False),
+        id=job_id,
+        owner=request.user,
+    )
+    state = _job_card_context(job)
+    return render(request, "translator/confirm_delete.html", state)
+
+
+@login_required
+@require_POST
+def delete_job(request, job_id):
+    """POST — soft-delete a job owned by the current user.
+
+    Only the job owner may delete their own job.  Superusers use the admin
+    interface for administrative deletions.
+    """
+    from django.utils import timezone
+
+    job = get_object_or_404(
+        TranslationJob.objects.filter(is_deleted=False),
+        id=job_id,
+        owner=request.user,
+    )
+
+    job.is_deleted = True
+    job.deleted_at = timezone.now()
+    job.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
+
+    UserActivityLog.objects.create(
+        user=request.user,
+        action="delete_job",
+        object_type="TranslationJob",
+        object_id=job.job_id,
+        metadata={"filename": job.original_filename, "status": job.status},
+    )
+
+    SystemEventLog.objects.create(
+        actor=request.user,
+        job=job,
+        event_type="translation_job_deleted",
+        message=f"Job soft-deleted by owner: {job.original_filename}",
+        metadata={"filename": job.original_filename, "status": job.status},
+    )
+
+    messages.success(request, f"‘{job.original_filename}’ has been removed from your history.")
+    return redirect("translator:history")
+
+
 def _get_owned_job(request, job_id) -> TranslationJob:
     return get_object_or_404(_owned_jobs_queryset(request), id=job_id)
 
 
 def _owned_jobs_queryset(request):
-    queryset = TranslationJob.objects.all()
+    queryset = TranslationJob.objects.filter(is_deleted=False)
 
     if not request.user.is_superuser:
         queryset = queryset.filter(owner=request.user)
@@ -587,6 +664,26 @@ def _job_state_context(job: TranslationJob) -> dict:
     can_preview = job.status == TranslationJob.Status.COMPLETED
     can_download = can_preview and _translated_output_exists(job)
 
+    # Phase 4: expose OCR/extraction metadata from job.metadata JSONField
+    metadata = job.metadata or {}
+    raw_extraction_method = metadata.get("extraction_method", "")
+    extraction_method_label = _extraction_method_label(raw_extraction_method)
+
+    ocr_summary = metadata.get("ocr_summary") or {}
+    mean_confidence = ocr_summary.get("mean_confidence")  # 0.0–1.0 or None
+    ocr_confidence_pct = round(mean_confidence * 100) if mean_confidence is not None else None
+    ocr_has_low_quality = bool(ocr_summary.get("has_low_quality_warning", False))
+
+    # Gather OCR warnings from job metadata (set by pipeline) and from OCRResults
+    ocr_warnings: list = list(metadata.get("ocr_warnings") or [])
+    try:
+        for ocr_result in job.ocr_results.all():
+            for w in (ocr_result.warnings or []):
+                if w and w not in ocr_warnings:
+                    ocr_warnings.append(w)
+    except Exception:
+        pass
+
     return {
         "job": job,
         "can_preview": can_preview,
@@ -594,6 +691,12 @@ def _job_state_context(job: TranslationJob) -> dict:
         "is_processing": is_processing,
         "has_failed": has_failed,
         "can_retry": False,
+        # Phase 4 fields
+        "extraction_method": raw_extraction_method,
+        "extraction_method_label": extraction_method_label,
+        "ocr_confidence_pct": ocr_confidence_pct,
+        "ocr_has_low_quality": ocr_has_low_quality,
+        "ocr_warnings": ocr_warnings,
     }
 
 
@@ -725,27 +828,37 @@ def _file_icon_class(file_type: str) -> str:
     return f"file-{str(file_type or 'document').lower()}"
 
 
+def _extraction_method_label(method: str) -> str:
+    """Convert internal extraction_method code to a human-readable label."""
+    return {
+        'direct_pdf_text': 'Direct PDF Text (PyMuPDF)',
+        'ocr_image': 'OCR - Tesseract',
+        'docx_text': 'DOCX Text (python-docx)',
+        'plain_text': 'Plain Text',
+        'hybrid': 'Hybrid (text + OCR)',
+        'text_extraction': 'Text Extraction',
+    }.get(method, method.replace('_', ' ').title() if method else '-')
+
+
 def _status_label(status: str) -> str:
     return {
-        TranslationJob.Status.QUEUED: "Pending",
-        TranslationJob.Status.PROCESSING: "Processing",
-        TranslationJob.Status.COMPLETED: "Completed",
-        TranslationJob.Status.FAILED: "Failed",
-    }.get(status, status.title() if status else "Unknown")
+        TranslationJob.Status.QUEUED: 'Pending',
+        TranslationJob.Status.PROCESSING: 'Processing',
+        TranslationJob.Status.COMPLETED: 'Completed',
+        TranslationJob.Status.FAILED: 'Failed',
+    }.get(status, status.title() if status else 'Unknown')
 
 
 def _status_class(status: str) -> str:
     if status == TranslationJob.Status.QUEUED:
-        return "pending"
-
-    return str(status or "unknown")
+        return 'pending'
+    return str(status or 'unknown')
 
 
 def _failure_message(job: TranslationJob) -> str:
     if job.status != TranslationJob.Status.FAILED:
-        return ""
-
-    return job.error or "Translation failed safely"
+        return ''
+    return job.error or 'Translation failed safely'
 
 
 def _translated_output_exists(job: TranslationJob) -> bool:

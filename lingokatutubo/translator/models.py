@@ -107,11 +107,17 @@ class TranslationJob(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
+    # Soft-delete fields — deleted jobs are hidden from normal history queries
+    # but preserved in the database for audit and recovery purposes.
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["owner", "-created_at"]),
             models.Index(fields=["status", "-created_at"]),
+            models.Index(fields=["owner", "is_deleted", "-created_at"], name="trans_owner_del_created_idx"),
         ]
 
     def __str__(self) -> str:

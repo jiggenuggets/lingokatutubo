@@ -1,19 +1,20 @@
 {% extends "translator/base.html" %}
 
 {% block title %}Translate Documents{% endblock %}
+{% block meta_description %}Upload a PDF, DOCX, image, or text document for Bagobo-Tagabawa translation.{% endblock %}
 
 {% block content %}
 <main class="translator-page">
   <header class="page-heading compact">
     <h1>Document Translator</h1>
-    <p>Upload a document, track OCR and translation progress, then review the aligned bilingual result.</p>
+    <p class="page-subtitle">Upload a document, track OCR and translation progress, then review the aligned bilingual result.</p>
   </header>
 
   <section class="document-dashboard">
     <aside class="recent-sidebar" aria-label="Recent documents">
       <div class="section-title-row">
         <h2>Recent Documents</h2>
-        <a href="{% url 'translator:history' %}">All</a>
+        <a href="{% url 'translator:history' %}" class="view-all-link">View all →</a>
       </div>
 
       {% if recent_jobs %}
@@ -21,7 +22,7 @@
           {% for state in recent_jobs %}
             {% with job=state.job %}
               <article class="document-card">
-                <div class="document-thumb {{ state.file_icon_class }}">
+                <div class="document-thumb {{ state.file_icon_class }}" aria-hidden="true">
                   {% if state.thumbnail_url %}
                     <img src="{{ state.thumbnail_url }}" alt="{{ state.document_title }} preview">
                   {% else %}
@@ -29,27 +30,17 @@
                   {% endif %}
                 </div>
                 <div class="document-card-body">
-                  <h3>{{ state.document_title }}</h3>
-                  <p>{{ state.uploaded_at|date:"M j, Y H:i" }}</p>
-                  {% if state.completed_at %}
-                    <p>Completed {{ state.completed_at|date:"M j, Y H:i" }}</p>
-                  {% endif %}
-                  <p>{{ job.source_language }} to {{ job.target_language }}</p>
-                  {% if state.ocr_confidence is not None %}
-                    <p>OCR {{ state.ocr_confidence|floatformat:2 }}</p>
-                  {% else %}
-                    <p>OCR result not available yet</p>
-                  {% endif %}
-                  <span class="status-pill {{ state.status_class }}">{{ state.status_label }}</span>
-                  <div class="history-actions">
+                  <h3 class="document-card-title" title="{{ state.document_title }}">{{ state.document_title }}</h3>
+                  <p>{{ state.uploaded_at|date:"M j, Y" }}</p>
+                  <p>{{ job.source_language }} → {{ job.target_language }}</p>
+                  <span class="status-pill {{ state.status_class }}" role="status">{{ state.status_label }}</span>
+                  <div class="history-actions compact-actions">
+                    <a class="button-link" href="{% url 'translator:job_detail' job.id %}">Details</a>
                     {% if state.can_preview %}
-                      <a href="{% url 'translator:job_preview' job.id %}">Preview</a>
+                      <a class="button-link" href="{% url 'translator:job_preview' job.id %}">Preview</a>
                     {% endif %}
                     {% if state.can_download %}
-                      <a href="{% url 'translator:job_download' job.id %}">Download</a>
-                    {% endif %}
-                    {% if not state.can_preview %}
-                      <a href="{% url 'translator:job_detail' job.id %}">Details</a>
+                      <a class="button-link" href="{% url 'translator:job_download' job.id %}">Download</a>
                     {% endif %}
                   </div>
                 </div>
@@ -58,7 +49,14 @@
           {% endfor %}
         </div>
       {% else %}
-        <p class="muted">No uploaded documents yet.</p>
+        <div class="sidebar-empty-state">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="sidebar-empty-icon">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <p>No documents yet.</p>
+          <p class="text-muted small">Upload your first document to get started.</p>
+        </div>
       {% endif %}
     </aside>
 
@@ -76,13 +74,15 @@
         {% csrf_token %}
         <label id="drop-zone" class="drop-zone" for="id_file">
           <input id="id_file" name="file" type="file" accept=".pdf,.docx,.jpg,.jpeg,.png,.txt">
-          <span class="drop-icon">DOC</span>
+          <span class="drop-icon" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </span>
           <strong id="selected-file-name">Drop your document here</strong>
-          <small id="selected-file-meta">PDF, DOCX, JPG, PNG, or TXT up to 50 MB</small>
+          <small id="selected-file-meta">PDF, DOCX, JPG, PNG, or TXT — up to 50 MB</small>
         </label>
 
-        <div id="upload-error" class="alert error" hidden></div>
-        <div id="ready-message" class="alert success" hidden>File ready. Start the translation when ready.</div>
+        <div id="upload-error" class="alert error" hidden role="alert"></div>
+        <div id="ready-message" class="alert success" hidden role="status">File ready. Click Start Translation when ready.</div>
 
         <div id="progress-card" class="progress-card" hidden>
           <div class="progress-top">
@@ -90,9 +90,9 @@
               <strong id="progress-title">Queued</strong>
               <p id="progress-message">Document is waiting to be processed.</p>
             </div>
-            <span id="progress-percent">0%</span>
+            <span id="progress-percent" class="progress-pct">0%</span>
           </div>
-          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="progress-fill"></div>
           </div>
           <p class="current-step"><strong>Current step:</strong> <span id="progress-step">Queued</span></p>
@@ -102,6 +102,7 @@
     </section>
 
     <aside class="settings-panel workflow-panel">
+      <h2 class="sidebar-section-title">Translation Settings</h2>
       <label>
         <span>Source Language</span>
         <select form="upload-form" name="source_language" id="source-language">
@@ -123,9 +124,22 @@
         </select>
       </label>
 
-      <label>
-        <span>OCR Languages</span>
-        <input form="upload-form" name="ocr_languages" type="text" placeholder="Optional, e.g. eng+fil">
+      <div class="ocr-languages-selector">
+        <span class="field-label">OCR Languages <span class="label-optional">(optional)</span></span>
+        <div class="checkbox-group">
+          {% for choice_value, choice_label in upload_form.ocr_languages_list.field.choices %}
+            <label class="checkbox-label">
+              <input type="checkbox" form="upload-form" name="ocr_languages_list" value="{{ choice_value }}"
+                     {% if choice_value == 'eng' or choice_value == 'fil' %}checked{% endif %}>
+              <span>{{ choice_label }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <label class="custom-ocr-label">
+        <span>Custom OCR Codes <span class="label-optional">(advanced fallback)</span></span>
+        <input form="upload-form" name="ocr_languages_custom" type="text" placeholder="e.g. eng+fil">
       </label>
 
       <button id="translate-button" class="button primary full" form="upload-form" type="submit" disabled>
@@ -138,19 +152,28 @@
       </div>
 
       <section class="workflow-status">
-        <h2>Current Job</h2>
+        <h2 class="sidebar-section-title">Active Job</h2>
         {% if active_job %}
           {% with job=active_job.job %}
-            <p><strong>{{ active_job.document_title }}</strong></p>
-            <p>{{ active_job.status_label }} - {{ job.source_language }} to {{ job.target_language }}</p>
+            <p class="active-job-name"><strong>{{ active_job.document_title }}</strong></p>
+            <p>
+              <span class="status-pill {{ active_job.status_class }}" role="status">{{ active_job.status_label }}</span>
+              <span class="text-muted">{{ job.source_language }} → {{ job.target_language }}</span>
+            </p>
             {% if active_job.has_failed %}
-              <div class="alert error">{{ active_job.failure_message }}</div>
+              <div class="alert error" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                Translation failed safely.
+              </div>
             {% elif active_job.is_processing %}
-              <div class="alert success">Processing is running. Preview and download will appear when output is ready.</div>
+              <div class="alert info" role="status">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Processing… Preview and download will appear when ready.
+              </div>
             {% endif %}
           {% endwith %}
         {% else %}
-          <p class="muted">Upload a document to start a new translation job.</p>
+          <p class="text-muted small">No active job. Upload a document to start.</p>
         {% endif %}
       </section>
     </aside>

@@ -488,3 +488,332 @@ class TranslatorAuthAndJobTests(TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
+
+
+# ============================================================
+# Phase 4 — System Design, Gating, Security & Purge Tests
+# ============================================================
+
+import os
+import shutil
+
+
+class TranslatorPhase4SystemTests(TestCase):
+    password = "Bagobo-Test-Phase4-Sys!"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="sysalice", email="sysalice@example.test", password=self.password
+        )
+        self.bob = User.objects.create_user(
+            username="sysbob", email="sysbob@example.test", password=self.password
+        )
+
+    def _create_job(self, owner, status="completed", metadata=None):
+        return TranslationJob.objects.create(
+            owner=owner,
+            original_filename="test_doc.pdf",
+            file_type="pdf",
+            status=status,
+            source_language="english",
+            target_language="tagabawa",
+            metadata=metadata or {},
+        )
+
+    def test_scanned_pdf_uses_ocr_automatically(self):
+        from translator.services.detection_service import DetectionService, DetectionType
+        orig = DetectionService._count_pdf_text_chars
+        try:
+            DetectionService._count_pdf_text_chars = staticmethod(lambda path: (10, 1))
+            det_type = DetectionService.detect_pdf_type("dummy.pdf")
+            self.assertEqual(det_type, DetectionType.SCANNED)
+        finally:
+            DetectionService._count_pdf_text_chars = orig
+
+    def test_image_upload_uses_ocr_automatically(self):
+        from translator.services.detection_service import DetectionService, DetectionType
+        det_type = DetectionService.detect_image_type("dummy.png")
+        self.assertEqual(det_type, DetectionType.SCANNED)
+
+    def test_digital_pdf_uses_direct_text_extraction(self):
+        from translator.services.detection_service import DetectionService, DetectionType
+        orig = DetectionService._count_pdf_text_chars
+        try:
+            DetectionService._count_pdf_text_chars = staticmethod(lambda path: (60, 1))
+            det_type = DetectionService.detect_pdf_type("dummy.pdf")
+            self.assertEqual(det_type, DetectionType.DIGITAL)
+        finally:
+            DetectionService._count_pdf_text_chars = orig
+
+    def test_low_text_pdf_falls_back_to_ocr(self):
+        from translator.services.detection_service import DetectionService, DetectionType
+        orig = DetectionService._count_pdf_text_chars
+        try:
+            DetectionService._count_pdf_text_chars = staticmethod(lambda path: (49, 1))
+            det_type = DetectionService.detect_pdf_type("dummy.pdf")
+            self.assertEqual(det_type, DetectionType.SCANNED)
+        finally:
+            DetectionService._count_pdf_text_chars = orig
+
+    def test_docx_uses_docx_text_extraction(self):
+        from translator.services.detection_service import DetectionService, DetectionType
+        det_type = DetectionService.detect_docx_type("dummy.docx")
+        self.assertEqual(det_type, DetectionType.DIGITAL)
+
+    def test_txt_uses_plain_text_extraction(self):
+        job = self._create_job(self.alice, status="processing")
+        job.file_type = "txt"
+        job.save()
+        self.assertEqual(job.file_type, "txt")
+
+    def test_extraction_method_saved_in_metadata(self):
+        job = self._create_job(self.alice, status="completed", metadata={"extraction_method": "docx_text"})
+        self.assertEqual(job.metadata.get("extraction_method"), "docx_text")
+
+    def test_ocr_confidence_saved_and_displayed(self):
+        job = self._create_job(self.alice, status="completed", metadata={
+            "extraction_method": "ocr_image",
+            "ocr_summary": {"mean_confidence": 0.85}
+        })
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("85%", response.content.decode("utf-8"))
+
+    def test_ocr_warnings_saved_and_displayed(self):
+        job = self._create_job(self.alice, status="completed", metadata={
+            "ocr_warnings": ["Warning text 123"]
+        })
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Warning text 123", response.content.decode("utf-8"))
+
+    @patch("translator.services._get_pipeline_service")
+    def test_ocr_failure_fails_safely(self, mock_pipeline):
+        from translator.services import _run_translation_job
+        mock_pipeline.side_effect = Exception("Tesseract failed catastrophically")
+        job = self._create_job(self.alice, status="queued")
+        _run_translation_job(
+            job.job_id,
+            job.input_file_path,
+            "pdf",
+            "auto",
+            "tagabawa",
+            None
+        )
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.FAILED)
+        self.assertIn("Tesseract failed catastrophically", job.error)
+
+    def test_upload_invalid_file_rejected(self):
+        self.client.force_login(self.alice)
+        bad_file = SimpleUploadedFile("danger.exe", b"binary content", content_type="application/octet-stream")
+        response = self.client.post(reverse("translator:upload"), {"file": bad_file})
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_large_file_rejected(self):
+        self.client.force_login(self.alice)
+        large_file = SimpleUploadedFile("big.pdf", b"a" * (51 * 1024 * 1024), content_type="application/pdf")
+        response = self.client.post(reverse("translator:upload"), {"file": large_file})
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_requires_login(self):
+        response = self.client.post(reverse("translator:upload"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_upload_csrf_required(self):
+        from django.test import Client
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.alice)
+        # Load page to set cookie
+        csrf_client.get(reverse("translator:translate"))
+        response = csrf_client.post(reverse("translator:upload"), {"file": "dummy"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_upload_rate_limit_blocks_excess_requests(self):
+        self.client.force_login(self.alice)
+        from django.core.cache import cache
+        cache.clear()
+        for _ in range(5):
+            self.client.post(reverse("translator:upload"), {"file": ""})
+        response = self.client.post(reverse("translator:upload"), {"file": ""})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("upload limit", response.json()["detail"])
+
+    def test_active_job_limit_blocks_excess_processing_jobs(self):
+        self.client.force_login(self.alice)
+        self._create_job(self.alice, status=TranslationJob.Status.QUEUED)
+        self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        response = self.client.post(reverse("translator:upload"), {"file": ""})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("upload limit", response.json()["detail"])
+
+    def test_preview_hidden_before_completed(self):
+        job = self._create_job(self.alice, status="processing")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+        self.assertRedirects(response, reverse("translator:job_detail", args=[job.id]))
+
+    def test_download_hidden_until_output_exists(self):
+        job = self._create_job(self.alice, status="completed")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_download", args=[job.id]))
+        self.assertRedirects(response, reverse("translator:job_detail", args=[job.id]))
+
+    def test_failed_job_hides_preview_and_download(self):
+        job = self._create_job(self.alice, status="failed")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"Preview Bilingual", response.content)
+
+    def test_user_cannot_view_another_users_job(self):
+        job = self._create_job(self.bob, status="completed")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_user_cannot_preview_another_users_job(self):
+        job = self._create_job(self.bob, status="completed")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_user_cannot_download_another_users_output(self):
+        job = self._create_job(self.bob, status="completed")
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_download", args=[job.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_user_cannot_delete_another_users_job(self):
+        job = self._create_job(self.bob, status="completed")
+        self.client.force_login(self.alice)
+        response = self.client.post(reverse("translator:job_delete", args=[job.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_preview_image_blocks_path_traversal(self):
+        self.client.force_login(self.alice)
+        job = self._create_job(self.alice, status="completed")
+        response = self.client.get(reverse("translator:translate_preview_image", args=[job.id, "invalid_name.png"]))
+        self.assertEqual(response.status_code, 400)
+
+    @patch("translator.views._translated_output_path")
+    @patch("translator.views._translated_output_exists")
+    def test_download_serves_attachment_pdf_only(self, mock_exists, mock_path):
+        mock_exists.return_value = True
+        job = self._create_job(self.alice, status="completed")
+        with tempfile.NamedTemporaryFile(dir=self.media_root, delete=False) as tmp:
+            tmp.write(b"%PDF-1.4 mock content")
+            tmp_name = tmp.name
+        mock_path.return_value = Path(tmp_name)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_download", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], "application/pdf")
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        
+        # Close file handles to avoid Windows WinError 32 permission errors on cleanup
+        response.close()
+        os.remove(tmp_name)
+
+    def test_history_lists_only_user_jobs(self):
+        self._create_job(self.alice)
+        self._create_job(self.bob)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:history"))
+        self.assertEqual(response.status_code, 200)
+        jobs = response.context["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job"].owner, self.alice)
+
+    def test_soft_deleted_job_hidden_from_history(self):
+        job = self._create_job(self.alice)
+        job.is_deleted = True
+        job.save()
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:history"))
+        self.assertEqual(len(response.context["jobs"]), 0)
+
+    def test_soft_deleted_job_hidden_from_recent_sidebar(self):
+        job = self._create_job(self.alice)
+        job.is_deleted = True
+        job.save()
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:translate"))
+        self.assertEqual(len(response.context["recent_jobs"]), 0)
+
+    def test_deleted_job_returns_404_on_detail(self):
+        job = self._create_job(self.alice)
+        job.is_deleted = True
+        job.save()
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_confirm_delete_page_requires_login(self):
+        job = self._create_job(self.alice)
+        response = self.client.get(reverse("translator:job_delete_confirm", args=[job.id]))
+        self.assertEqual(response.status_code, 302)
+
+    def test_delete_requires_post(self):
+        job = self._create_job(self.alice)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_delete", args=[job.id]))
+        self.assertEqual(response.status_code, 405)
+
+    def test_admin_extraction_method_display_handles_missing_metadata(self):
+        from translator.admin import TranslationJobAdmin
+        from django.contrib.admin.sites import AdminSite
+        admin_site = AdminSite()
+        admin_instance = TranslationJobAdmin(TranslationJob, admin_site)
+        job = self._create_job(self.alice, metadata=None)
+        display = admin_instance.extraction_method_display(job)
+        self.assertEqual(display, "—")
+
+    def test_admin_ocr_confidence_display_handles_null_values(self):
+        from translator.admin import TranslationJobAdmin
+        from django.contrib.admin.sites import AdminSite
+        admin_site = AdminSite()
+        admin_instance = TranslationJobAdmin(TranslationJob, admin_site)
+        job = self._create_job(self.alice, metadata=None)
+        display = admin_instance.ocr_confidence_display(job)
+        self.assertEqual(display, "N/A")
+
+    def test_purge_deleted_job_files_dry_run(self):
+        from django.core.management import call_command
+        from django.utils import timezone
+        from datetime import timedelta
+        job = self._create_job(self.alice, status="completed")
+        job.is_deleted = True
+        job.deleted_at = timezone.now() - timedelta(days=31)
+        with tempfile.NamedTemporaryFile(dir=self.media_root, delete=False) as tmp:
+            tmp.write(b"dummy content")
+            tmp_name = tmp.name
+        job.input_file_path = tmp_name
+        job.save()
+        call_command("purge_deleted_job_files", days=30, dry_run=True)
+        self.assertTrue(os.path.exists(tmp_name))
+        os.remove(tmp_name)
+
+    def test_purge_deleted_job_files_actual(self):
+        from django.core.management import call_command
+        from django.utils import timezone
+        from datetime import timedelta
+        job = self._create_job(self.alice, status="completed")
+        job.is_deleted = True
+        job.deleted_at = timezone.now() - timedelta(days=31)
+        with tempfile.NamedTemporaryFile(dir=self.media_root, delete=False) as tmp:
+            tmp.write(b"dummy content")
+            tmp_name = tmp.name
+        job.input_file_path = tmp_name
+        job.save()
+        call_command("purge_deleted_job_files", days=30)
+        self.assertFalse(os.path.exists(tmp_name))

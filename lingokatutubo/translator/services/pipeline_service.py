@@ -1,4 +1,4 @@
-﻿"""
+"""
 Translation pipeline coordinator
 Orchestrates the entire translation workflow
 """
@@ -203,36 +203,56 @@ class PipelineService:
             if job.detection_type == DetectionType.DIGITAL:
                 if file_type == FileType.PDF:
                     layout_data = self.extraction_service.extract_pdf_text_and_layout(input_file_path)
+                    job.metadata["extraction_method"] = "direct_pdf_text"
                 elif file_type == FileType.DOCX:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
+                    job.metadata["extraction_method"] = "docx_text"
                 elif file_type == FileType.TXT:
                     layout_data = self._extract_txt_text_and_layout(input_file_path)
+                    job.metadata["extraction_method"] = "plain_text"
             else:
                 # Scanned input: route through Tesseract OCR. No mock fallback.
                 self._set_job_phase(job, "ocr")
+                ocr_summary_data: Optional[Dict[str, Any]] = None
                 try:
                     if file_type == FileType.PDF:
-                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR")
+                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR at {self.ocr_service.dpi} DPI")
                         layout_data = self.ocr_service.extract_pdf_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
                         )
                     elif file_type in (FileType.JPG, FileType.PNG):
-                        print(f"[Pipeline] Image input - running Tesseract OCR")
+                        print(f"[Pipeline] Image input - running Tesseract OCR at {self.ocr_service.dpi} DPI")
                         layout_data = self.ocr_service.extract_image_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
                         )
                     else:
                         layout_data = []
+
+                    # Phase 4: compute OCR quality summary after extraction
+                    ocr_summary_data = self.ocr_service._compute_page_ocr_summary(
+                        layout_data or [],
+                        self.ocr_service.low_confidence_threshold,
+                    )
+                    job.metadata["extraction_method"] = "ocr_image"
+                    job.metadata["ocr_summary"] = ocr_summary_data
+                    if ocr_summary_data.get("has_low_quality_warning"):
+                        mean_c = ocr_summary_data.get("mean_confidence")
+                        job.metadata.setdefault("ocr_warnings", []).append(
+                            f"Low OCR confidence: mean={mean_c:.0%} across "
+                            f"{ocr_summary_data.get('total_block_count', 0)} block(s)."
+                        )
                 except OCRUnavailableError as e:
                     ocr_unavailable_msg = str(e)
                     print(f"[Pipeline] OCR unavailable: {e}")
                     layout_data = []
+                    job.metadata["extraction_method"] = "ocr_image"
                 except Exception as e:
                     print(f"[Pipeline] OCR error: {e}")
                     ocr_unavailable_msg = f"OCR error: {e}"
                     layout_data = []
+                    job.metadata["extraction_method"] = "ocr_image"
 
             # layout_data may legitimately be empty for scanned input when OCR
             # finds no text — defer the failure to after structure.json is saved
@@ -760,10 +780,15 @@ class PipelineService:
                     "low-quality, or in an unsupported language."
                 )
 
+        extraction_method: str = job.metadata.get("extraction_method", "")
+        ocr_summary: Optional[Dict[str, Any]] = job.metadata.get("ocr_summary")
+
         structure = {
             "job_id": job_id,
             "status": job.status,
             "detected_type": detected_type,
+            "extraction_method": extraction_method,
+            "ocr_summary": ocr_summary,
             "pages": pages_out,
             "warnings": warnings,
         }

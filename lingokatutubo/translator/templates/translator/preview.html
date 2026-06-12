@@ -1,6 +1,7 @@
 {% extends "translator/base.html" %}
 
-{% block title %}Bilingual Preview{% endblock %}
+{% block title %}Bilingual Preview — {{ uploaded_document.original_filename|default:job.original_filename }}{% endblock %}
+{% block meta_description %}Bilingual preview for {{ uploaded_document.original_filename|default:job.original_filename }}.{% endblock %}
 
 {% block content %}
 <main
@@ -12,22 +13,27 @@
   data-download-url="{% url 'translator:job_download' job.id %}"
 >
   <header class="preview-header">
-    <div>
-      <a class="back-link" href="{% url 'translator:history' %}">Back to History</a>
+    <div class="preview-header-text">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="{% url 'translator:history' %}">← History</a>
+      </nav>
       <h1>Bilingual Preview</h1>
-      <p>{{ uploaded_document.original_filename|default:job.original_filename }}</p>
+      <p class="page-subtitle">{{ uploaded_document.original_filename|default:job.original_filename }}</p>
     </div>
-    <div class="hero-actions">
+    <div class="hero-actions preview-header-actions">
       {% if can_download %}
-        <a id="preview-download" class="button primary" href="{% url 'translator:job_download' job.id %}">Download Translated PDF</a>
+        <a id="preview-download" class="button primary" href="{% url 'translator:job_download' job.id %}">
+          Download Translated PDF
+        </a>
       {% endif %}
+      <a class="button secondary" href="{% url 'translator:job_detail' job.id %}">Job Details</a>
     </div>
   </header>
 
   <section class="preview-layout">
     <aside class="preview-pages-panel">
       <h2>Document Preview</h2>
-      <div class="document-thumb large {{ file_icon_class }}">
+      <div class="document-thumb large {{ file_icon_class }}" aria-hidden="true">
         {% if thumbnail_url %}
           <img src="{{ thumbnail_url }}" alt="{{ uploaded_document.original_filename|default:job.original_filename }} preview">
         {% else %}
@@ -38,68 +44,83 @@
       {% if image_preview.original_pages %}
         <div class="page-thumb-list">
           {% for page_url in image_preview.original_pages %}
-            <a href="{{ page_url }}" target="_blank" rel="noopener">
+            <a href="{{ page_url }}" target="_blank" rel="noopener" aria-label="View page {{ forloop.counter }}">
               <img src="{{ page_url }}" alt="Page {{ forloop.counter }} preview">
               <span>Page {{ forloop.counter }}</span>
             </a>
           {% endfor %}
         </div>
       {% elif document_pages %}
-        <ol class="page-list">
+        <ol class="page-list" aria-label="Document pages">
           {% for page in document_pages %}
             <li>Page {{ page.page_number }}</li>
           {% endfor %}
         </ol>
       {% else %}
-        <p class="muted">No image preview is available yet.</p>
+        <div class="mini-empty-state">
+          <p class="text-muted">No image preview available.</p>
+        </div>
       {% endif %}
     </aside>
 
     <section class="bilingual-panel">
       <div class="section-title-row">
         <h2>Aligned Text</h2>
-        <span>{{ segments|length }} segment{{ segments|length|pluralize }}</span>
+        {% if segments %}
+          <span class="segment-count-badge">{{ segments|length }} segment{{ segments|length|pluralize }}</span>
+        {% endif %}
       </div>
+
       {% if segments %}
-        <div class="segment-table">
-          <div class="segment-head">#</div>
-          <div class="segment-head">Original Text</div>
-          <div class="segment-head">Translated Text</div>
-          <div class="segment-head">Method</div>
+        <div class="segment-table" role="table" aria-label="Bilingual aligned text">
+          <div class="segment-head" role="columnheader">#</div>
+          <div class="segment-head" role="columnheader">Original Text</div>
+          <div class="segment-head" role="columnheader">Translated Text</div>
+          <div class="segment-head" role="columnheader">Method / Confidence</div>
           {% for segment in segments %}
-            <div class="segment-index">{{ segment.segment_index }}</div>
-            <div>
+            <div class="segment-index" role="cell">{{ segment.segment_index }}</div>
+            <div role="cell">
               {% if segment.page %}
                 <small>Page {{ segment.page.page_number }}</small>
               {% endif %}
               <p>{{ segment.source_text }}</p>
             </div>
-            <div>
+            <div role="cell">
               <p class="{% if segment.needs_review %}needs-review{% endif %}">
                 {{ segment.translated_text|default:"[UNKNOWN_FOR_REVIEW]" }}
               </p>
               {% if segment.needs_review %}
-                <small class="needs-review">Unknown word or phrase needs review.</small>
+                <small class="needs-review">Needs review</small>
               {% endif %}
             </div>
-            <div>
+            <div role="cell">
               <small>{{ segment.method|default:"unknown" }}</small>
               {% if segment.confidence is not None %}
-                <p>{{ segment.confidence|floatformat:2 }}</p>
+                <p class="confidence-value">{{ segment.confidence|floatformat:2 }}</p>
               {% else %}
-                <p>n/a</p>
+                <p class="text-muted">n/a</p>
               {% endif %}
             </div>
           {% endfor %}
         </div>
       {% else %}
-        <p class="muted">Translation segments are not available yet.</p>
+        <div class="empty-state empty-state-inline">
+          <div class="empty-state-icon" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+            </svg>
+          </div>
+          <h3 class="empty-state-title">No translated segments available yet</h3>
+          <p class="empty-state-body">Segments are populated after the translation pipeline completes successfully.</p>
+        </div>
       {% endif %}
 
-      {% if ocr_summary.warnings %}
-        <section class="warning-box">
+      {% if ocr_warnings %}
+        <section class="warning-box" aria-label="OCR warnings">
           <strong>OCR and extraction warnings</strong>
-          {% for warning in ocr_summary.warnings %}
+          {% for warning in ocr_warnings %}
             <p>{{ warning }}</p>
           {% endfor %}
         </section>
@@ -114,24 +135,47 @@
           <dd>{{ uploaded_document.original_filename|default:job.original_filename }}</dd>
         </div>
         <div>
+          <dt>Status</dt>
+          <dd><span class="status-pill {{ status_class }}" role="status">{{ status_label }}</span></dd>
+        </div>
+        <div>
+          <dt>Language Pair</dt>
+          <dd>{{ job.source_language }} → {{ job.target_language }}</dd>
+        </div>
+        <div>
           <dt>Uploaded</dt>
           <dd>{% if uploaded_document %}{{ uploaded_document.created_at|date:"M j, Y H:i" }}{% else %}{{ job.created_at|date:"M j, Y H:i" }}{% endif %}</dd>
         </div>
         <div>
           <dt>Completed</dt>
-          <dd>{% if job.completed_at %}{{ job.completed_at|date:"M j, Y H:i" }}{% else %}Not completed{% endif %}</dd>
+          <dd>{% if job.completed_at %}{{ job.completed_at|date:"M j, Y H:i" }}{% else %}<span class="text-muted">Not completed</span>{% endif %}</dd>
         </div>
         <div>
-          <dt>Status</dt>
-          <dd><span class="status-pill {{ status_class }}">{{ status_label }}</span></dd>
-        </div>
-        <div>
-          <dt>Language Pair</dt>
-          <dd>{{ job.source_language }} to {{ job.target_language }}</dd>
+          <dt>Extraction Method</dt>
+          <dd>
+            {% if extraction_method_label and extraction_method_label != "—" %}
+              <span class="badge-method">{{ extraction_method_label }}</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </dd>
         </div>
         <div>
           <dt>OCR Confidence</dt>
-          <dd>{% if ocr_summary.confidence is not None %}{{ ocr_summary.confidence|floatformat:2 }}{% else %}OCR result not available yet{% endif %}</dd>
+          <dd>
+            {% if extraction_method == "ocr_image" %}
+              {% if ocr_confidence_pct is not None %}
+                <span class="{% if ocr_has_low_quality %}text-warning{% endif %}">
+                  {{ ocr_confidence_pct }}%
+                  {% if ocr_has_low_quality %}<span class="badge-warning">⚠ Low</span>{% endif %}
+                </span>
+              {% else %}
+                <span class="text-muted">Not computed</span>
+              {% endif %}
+            {% else %}
+              <span class="text-muted">N/A</span>
+            {% endif %}
+          </dd>
         </div>
         <div>
           <dt>Total Pages</dt>
@@ -147,17 +191,13 @@
         </div>
       </dl>
 
-      {% if has_failed %}
-        <div class="alert error">{{ failure_message }}</div>
-      {% endif %}
-
       <div class="complete-actions">
-        {% if can_preview %}
-          <a class="button secondary full" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
-        {% endif %}
         {% if can_download %}
-          <a class="button primary full" href="{% url 'translator:job_download' job.id %}">Download Translated PDF</a>
+          <a class="button primary full" href="{% url 'translator:job_download' job.id %}">
+            Download Translated PDF
+          </a>
         {% endif %}
+        <a class="button secondary full" href="{% url 'translator:history' %}">← Back to History</a>
       </div>
     </aside>
   </section>
@@ -165,9 +205,9 @@
   {% if image_preview.page_count %}
     <section id="preview-content" class="image-preview-panel">
       <div class="pager">
-        <div>
-          <button id="previous-page" type="button">Previous</button>
-          <button id="next-page" type="button">Next</button>
+        <div class="pager-buttons">
+          <button id="previous-page" type="button">← Previous</button>
+          <button id="next-page" type="button">Next →</button>
         </div>
         <p>Page <strong id="current-page">1</strong> of <strong id="page-count">{{ image_preview.page_count }}</strong></p>
       </div>
@@ -191,8 +231,8 @@
         <div id="structure-warnings" class="warning-box" hidden></div>
       </details>
     </section>
-    <div id="preview-loading" class="loading-panel" hidden>Loading preview...</div>
-    <div id="preview-error" class="alert error" hidden></div>
+    <div id="preview-loading" class="loading-panel" hidden>Loading preview…</div>
+    <div id="preview-error" class="alert error" hidden role="alert"></div>
   {% endif %}
 </main>
 {% endblock %}

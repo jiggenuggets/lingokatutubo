@@ -26,18 +26,27 @@ class OCRService:
     extraction. Internally we render at `dpi` and scale pixel boxes back.
     """
 
+    # Confidence threshold below which a block is flagged as low quality.
+    # Tesseract confidence is in [0, 1]; 0.60 means 60% word-level confidence.
+    low_confidence_threshold: float = 0.60
+
     def __init__(
         self,
-        dpi: int = 200,
+        dpi: int = 300,
         lang: str = "eng",
         preprocess: bool = True,
         denoise: bool = True,
         detect_orientation: bool = True,
+        threshold: bool = True,
     ):
+        # DPI 300 is the Tesseract-recommended minimum for reliable OCR.
+        # 200 DPI was used previously; raising to 300 improves recognition
+        # accuracy significantly on standard-quality scanned documents.
         self.dpi = dpi
         self.lang = lang
         self.preprocess_enabled = preprocess
         self.denoise_enabled = denoise
+        self.threshold_enabled = threshold
         self.detect_orientation_enabled = detect_orientation
         self._verified: Optional[bool] = None
         self._installed_languages: Optional[List[str]] = None
@@ -246,10 +255,21 @@ class OCRService:
     # ------------------------------------------------------------------
 
     def _preprocess(self, img):
-        """Grayscale + autocontrast + light denoise.
+        """Grayscale + autocontrast + optional OTSU threshold + light denoise.
 
-        Every operation here MUST preserve pixel dimensions so the existing
-        DPI->points scaling stays valid. No resizing, no rotation.
+        Pipeline (Phase 4):
+        1. Convert to grayscale (mode L) — Tesseract works on single-channel.
+        2. Autocontrast with 2% cutoff — stretches histogram to improve
+           ink-to-background separation on normal scans.
+        3. Conservative threshold (OTSU-style) — applied ONLY when the image
+           mean pixel value is > 180 (very washed-out / faded documents).
+           For normal-quality scans this step is skipped so we do not harm
+           already-legible text with aggressive binarisation.
+        4. Mild 3×3 median filter — removes salt-and-pepper noise from scanner
+           dust or JPEG compression artefacts.
+
+        Every operation preserves pixel dimensions so the DPI→points scaling
+        stays valid. No resizing, no rotation.
         """
         if not self.preprocess_enabled:
             return img
@@ -267,6 +287,24 @@ class OCRService:
             img = ImageOps.autocontrast(img, cutoff=2)
         except Exception as e:
             print(f"[OCR] autocontrast failed: {e}")
+
+        # Conservative OTSU-style binarisation: only apply when the image is
+        # very faint (mean > 180 on a 0–255 scale, meaning mostly very light
+        # grey pixels). This targets washed-out thermal-printer or old-scanner
+        # output without degrading normal black-on-white documents.
+        if self.threshold_enabled:
+            try:
+                import statistics
+                pixels = list(img.getdata())
+                mean_px = statistics.mean(pixels)
+                if mean_px > 180:
+                    # Simple global threshold at midpoint between mean and 255.
+                    # This is a lightweight approximation of OTSU for documents.
+                    threshold_value = int((mean_px + 255) / 2)
+                    img = img.point(lambda px: 255 if px > threshold_value else 0)
+                    print(f"[OCR] Applied threshold (mean={mean_px:.1f}, cutoff={threshold_value})")
+            except Exception as e:
+                print(f"[OCR] threshold failed: {e}")
 
         if self.denoise_enabled:
             try:
@@ -499,6 +537,125 @@ class OCRService:
                 language_warnings=language_warnings,
             )
         ]
+
+    # ------------------------------------------------------------------
+    # OCR quality summary
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_page_ocr_summary(
+        pages_data: List[Dict[str, Any]],
+        low_confidence_threshold: float = 0.60,
+    ) -> Dict[str, Any]:
+        """Compute an aggregate OCR quality summary across all pages.
+
+        Returns a dict suitable for storing in job metadata / structure.json:
+        {
+            "mean_confidence": float or None,
+            "min_confidence":  float or None,
+            "low_confidence_block_count": int,
+            "total_block_count": int,
+            "has_low_quality_warning": bool,
+            "page_count": int,
+        }
+        Only blocks that carry an OCR confidence value (scanned path) are
+        considered. Digital-PDF blocks have no OCR confidence and are excluded.
+        """
+        all_confs: List[float] = []
+        low_count = 0
+        total_blocks = 0
+
+        for page_data in pages_data:
+            for block in page_data.get("blocks", []):
+                raw = block.get("confidence")
+                if raw is None:
+                    continue
+                try:
+                    conf = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                all_confs.append(conf)
+                total_blocks += 1
+                if conf < low_confidence_threshold:
+                    low_count += 1
+
+        if not all_confs:
+            return {
+                "mean_confidence": None,
+                "min_confidence": None,
+                "low_confidence_block_count": 0,
+                "total_block_count": 0,
+                "has_low_quality_warning": False,
+                "page_count": len(pages_data),
+            }
+
+        mean_conf = round(sum(all_confs) / len(all_confs), 4)
+        min_conf = round(min(all_confs), 4)
+        has_warning = mean_conf < low_confidence_threshold or low_count > 0
+
+        return {
+            "mean_confidence": mean_conf,
+            "min_confidence": min_conf,
+            "low_confidence_block_count": low_count,
+            "total_block_count": total_blocks,
+            "has_low_quality_warning": has_warning,
+            "page_count": len(pages_data),
+        }
+
+    def extract_text_with_fallback(
+        self,
+        image_path: str,
+        languages: Optional[Union[str, Sequence[str]]] = None,
+    ) -> Dict[str, Any]:
+        """OCR a single image with structured fallback and quality summary.
+
+        Returns:
+        {
+            "pages": [...],          # layout_data for downstream pipeline
+            "ocr_summary": {...},    # from _compute_page_ocr_summary()
+            "extraction_method": "ocr_image",
+            "warnings": [...],
+        }
+        Safe to call even when Tesseract is unavailable — returns an empty
+        pages list with a clear error in warnings.
+        """
+        try:
+            pages = self.extract_image_text_and_layout(image_path, languages=languages)
+        except OCRUnavailableError as e:
+            return {
+                "pages": [],
+                "ocr_summary": self._compute_page_ocr_summary([]),
+                "extraction_method": "ocr_image",
+                "warnings": [f"OCR engine unavailable: {e}"],
+            }
+        except Exception as e:
+            return {
+                "pages": [],
+                "ocr_summary": self._compute_page_ocr_summary([]),
+                "extraction_method": "ocr_image",
+                "warnings": [f"OCR error: {e}"],
+            }
+
+        summary = self._compute_page_ocr_summary(pages, self.low_confidence_threshold)
+        warnings: List[str] = []
+        for page in pages:
+            if page.get("ocr_warning"):
+                warnings.append(page["ocr_warning"])
+            if page.get("ocr_error"):
+                warnings.append(f"Page {page.get('page', 0) + 1} OCR error: {page['ocr_error']}")
+        if summary["has_low_quality_warning"]:
+            warnings.append(
+                f"Low OCR confidence detected: mean={summary['mean_confidence']:.0%}, "
+                f"{summary['low_confidence_block_count']} of {summary['total_block_count']} "
+                "blocks below threshold."
+            )
+
+        return {
+            "pages": pages,
+            "ocr_summary": summary,
+            "extraction_method": "ocr_image",
+            "warnings": warnings,
+        }
 
     # ------------------------------------------------------------------
     # Internals

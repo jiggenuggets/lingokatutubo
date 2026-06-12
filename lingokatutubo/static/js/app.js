@@ -69,6 +69,9 @@
     return names[key] || text(value);
   }
 
+  /* =========================================================
+     Upload workflow
+  ========================================================= */
   function initUpload() {
     const form = document.getElementById("upload-form");
     if (!form) return;
@@ -180,7 +183,7 @@
       setError("");
       if (!file) {
         fileName.textContent = "Drop your document here";
-        fileMeta.textContent = "PDF, DOCX, JPG, PNG, or TXT up to 50 MB";
+        fileMeta.textContent = "PDF, DOCX, JPG, PNG, or TXT — up to 50 MB";
         readyMessage.hidden = true;
         button.disabled = true;
         return;
@@ -227,7 +230,7 @@
         status: "uploading",
         current_phase: "uploading",
         progress_percent: 3,
-        phase_message: "Uploading document to Django.",
+        phase_message: "Uploading document.",
         current_step: "Uploading document",
       });
 
@@ -266,6 +269,9 @@
     return data.error || "Upload failed.";
   }
 
+  /* =========================================================
+     Bilingual preview page
+  ========================================================= */
   function initPreview() {
     const root = document.getElementById("preview-app");
     if (!root) return;
@@ -407,8 +413,58 @@
       .catch((error) => showError(error.message || "Could not load preview."));
   }
 
+  /* =========================================================
+     Mobile navigation
+  ========================================================= */
+  function initMobileNav() {
+    const hamburger = document.getElementById("nav-hamburger");
+    const navLinks = document.getElementById("nav-links");
+    if (!hamburger || !navLinks) return;
+
+    hamburger.addEventListener("click", () => {
+      const isOpen = navLinks.classList.toggle("open");
+      hamburger.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+
+    navLinks.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => {
+        navLinks.classList.remove("open");
+        hamburger.setAttribute("aria-expanded", "false");
+      });
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!hamburger.contains(event.target) && !navLinks.contains(event.target)) {
+        navLinks.classList.remove("open");
+        hamburger.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
+  /* =========================================================
+     Dismissible flash messages
+  ========================================================= */
+  function initMessageDismiss() {
+    document.querySelectorAll(".message-dismiss").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const msg = btn.closest(".message");
+        if (msg) {
+          msg.style.transition = "opacity 200ms ease, transform 200ms ease";
+          msg.style.opacity = "0";
+          msg.style.transform = "translateY(-4px)";
+          setTimeout(() => msg.remove(), 210);
+        }
+      });
+    });
+  }
+
+  /* =========================================================
+     Boot
+  ========================================================= */
   document.addEventListener("DOMContentLoaded", () => {
     initUpload();
     initPreview();
+    initMobileNav();
+    initMessageDismiss();
   });
 })();

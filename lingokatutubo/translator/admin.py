@@ -59,14 +59,42 @@ class TranslationJobAdmin(admin.ModelAdmin):
         "owner",
         "status",
         "progress",
+        "extraction_method_display",
+        "ocr_confidence_display",
         "source_language",
         "target_language",
+        "is_deleted",
         "created_at",
     )
-    list_filter = ("status", "file_type", "source_language", "target_language", "created_at")
+    list_filter = ("status", "file_type", "source_language", "target_language", "is_deleted", "created_at")
     search_fields = ("id", "original_filename", "owner__username")
-    readonly_fields = ("id", "created_at", "updated_at", "completed_at")
+    readonly_fields = (
+        "id", "created_at", "updated_at", "completed_at", "deleted_at",
+        "extraction_method_display", "ocr_confidence_display",
+    )
     inlines = (DocumentPageInline, TranslationSegmentInline, GeneratedOutputInline)
+
+    @admin.display(description="Extraction Method")
+    def extraction_method_display(self, obj):
+        method = (obj.metadata or {}).get("extraction_method", "")
+        labels = {
+            "direct_pdf_text": "Direct PDF Text",
+            "ocr_image": "OCR (Tesseract)",
+            "docx_text": "DOCX Text",
+            "plain_text": "Plain Text",
+            "hybrid": "Hybrid",
+        }
+        return labels.get(method, method or "—")
+
+    @admin.display(description="OCR Confidence")
+    def ocr_confidence_display(self, obj):
+        summary = (obj.metadata or {}).get("ocr_summary") or {}
+        mean = summary.get("mean_confidence")
+        if mean is None:
+            return "N/A"
+        pct = round(mean * 100)
+        warning = " ⚠" if summary.get("has_low_quality_warning") else ""
+        return f"{pct}%{warning}"
 
 
 @admin.register(Language)
@@ -107,11 +135,26 @@ class DocumentPageAdmin(admin.ModelAdmin):
 
 @admin.register(OCRResult)
 class OCRResultAdmin(admin.ModelAdmin):
-    list_display = ("job", "page", "engine", "language_codes", "confidence", "status", "created_at")
-    list_filter = ("status", "engine", "language_codes", "created_at")
-    search_fields = ("job__id", "job__original_filename", "text")
-    readonly_fields = ("created_at", "updated_at")
+    list_display = (
+        "job", "page", "engine", "language_codes",
+        "confidence_display", "warnings_count", "status", "created_at",
+    )
+    list_filter = ("status", "engine", "created_at")
+    search_fields = ("job__id", "job__original_filename", "text", "engine")
+    readonly_fields = ("created_at", "updated_at", "confidence_display", "warnings_count")
     actions = ("mark_accepted", "mark_pending_review")
+
+    @admin.display(description="Confidence")
+    def confidence_display(self, obj):
+        if obj.confidence is None:
+            return "—"
+        pct = round(obj.confidence * 100)
+        return f"{pct}%"
+
+    @admin.display(description="Warnings")
+    def warnings_count(self, obj):
+        warnings = obj.warnings or []
+        return len(warnings)
 
     @admin.action(description="Mark selected OCR results as accepted")
     def mark_accepted(self, request, queryset):

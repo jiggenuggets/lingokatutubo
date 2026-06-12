@@ -1,0 +1,65 @@
+{% extends "translator/base.html" %}
+
+{% block title %}Remove Document — {{ document_title }}{% endblock %}
+
+{% block content %}
+<main class="translator-page">
+  <div class="confirm-delete-wrapper">
+    <div class="confirm-delete-card">
+
+      <div class="confirm-delete-icon" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+          <path d="M10 11v6"></path>
+          <path d="M14 11v6"></path>
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+        </svg>
+      </div>
+
+      <h1 class="confirm-delete-title">Remove from History?</h1>
+
+      <p class="confirm-delete-body">
+        This will remove <strong>{{ document_title }}</strong> from your translation history.
+        The document record will be hidden from your account. This action cannot be undone from the interface.
+      </p>
+
+      <div class="confirm-delete-meta">
+        <div class="confirm-meta-row">
+          <span class="confirm-meta-label">File</span>
+          <span class="confirm-meta-value">{{ document_title }}</span>
+        </div>
+        <div class="confirm-meta-row">
+          <span class="confirm-meta-label">Status</span>
+          <span class="confirm-meta-value">
+            <span class="status-pill {{ status_class }}">{{ status_label }}</span>
+          </span>
+        </div>
+        <div class="confirm-meta-row">
+          <span class="confirm-meta-label">Uploaded</span>
+          <span class="confirm-meta-value">{{ uploaded_at|date:"M j, Y H:i" }}</span>
+        </div>
+        {% if completed_at %}
+          <div class="confirm-meta-row">
+            <span class="confirm-meta-label">Completed</span>
+            <span class="confirm-meta-value">{{ completed_at|date:"M j, Y H:i" }}</span>
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="confirm-delete-actions">
+        <a class="button secondary" href="{% url 'translator:history' %}">
+          Cancel — Keep in History
+        </a>
+        <form method="post" action="{% url 'translator:job_delete' job.id %}">
+          {% csrf_token %}
+          <button type="submit" class="button danger" id="confirm-delete-submit">
+            Remove from History
+          </button>
+        </form>
+      </div>
+
+    </div>
+  </div>
+</main>
+{% endblock %}

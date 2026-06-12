@@ -253,6 +253,26 @@ def _sync_generated_outputs(job_id: str, paths: Dict[str, str]) -> None:
         )
 
 
+def _extraction_method_from_structure(structure: dict) -> str:
+    """Return the extraction_method string stored in structure.json.
+
+    Falls back gracefully to 'text_extraction' when the field is absent
+    (e.g. for jobs processed before Phase 4 was deployed).
+    """
+    return str(structure.get("extraction_method") or "text_extraction")
+
+
+def _engine_label_from_method(extraction_method: str) -> str:
+    """Map extraction_method to a human-readable OCRResult engine label."""
+    mapping = {
+        "direct_pdf_text": "pymupdf_text",
+        "docx_text": "python-docx",
+        "plain_text": "plain_text",
+        "ocr_image": "tesseract",
+    }
+    return mapping.get(extraction_method, "text_extraction")
+
+
 def _sync_structure_models(job_id: str, structure_path: str) -> None:
     try:
         job = TranslationJob.objects.get(id=job_id)
@@ -272,6 +292,21 @@ def _sync_structure_models(job_id: str, structure_path: str) -> None:
 
     seen_pages = set()
     segment_index = 0
+
+    # Phase 4: persist extraction_method from structure.json to job.metadata
+    extraction_method = _extraction_method_from_structure(structure)
+    ocr_summary = structure.get("ocr_summary")
+    existing_meta = dict(job.metadata or {})
+    updated_meta = False
+    if existing_meta.get("extraction_method") != extraction_method:
+        existing_meta["extraction_method"] = extraction_method
+        updated_meta = True
+    if ocr_summary and existing_meta.get("ocr_summary") != ocr_summary:
+        existing_meta["ocr_summary"] = ocr_summary
+        updated_meta = True
+    if updated_meta:
+        TranslationJob.objects.filter(id=job_id).update(metadata=existing_meta)
+
     for page_data in structure.get("pages", []):
         page_number = int(page_data.get("page_number") or page_data.get("page") or 0) or 1
         seen_pages.add(page_number)
@@ -350,7 +385,27 @@ def _sync_page_ocr(job: TranslationJob, page: DocumentPage, page_data: Dict[str,
             if isinstance(value, (int, float)):
                 confidences.append(float(value))
     confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
-    engine = "tesseract" if confidences else "text_extraction"
+
+    # Phase 4: use a descriptive engine label derived from the structure's
+    # extraction_method field. Fall back to "tesseract" vs "text_extraction"
+    # based on the presence of confidence values (pre-Phase-4 behaviour).
+    page_meta = page.metadata or {}
+    extraction_method = page_meta.get("extraction_method", "")
+    if not extraction_method:
+        # Try to read from the parent job
+        try:
+            extraction_method = job.metadata.get("extraction_method", "") or ""
+        except Exception:
+            extraction_method = ""
+    engine = _engine_label_from_method(extraction_method) if extraction_method else (
+        "tesseract" if confidences else "text_extraction"
+    )
+
+    # Collect warnings from both the page data and the page metadata
+    page_warnings = list(page_data.get("warnings", []) or [])
+    meta_warnings = list((page.metadata or {}).get("warnings", []) or [])
+    all_warnings = list(dict.fromkeys(page_warnings + meta_warnings))  # deduplicate
+
     OCRResult.objects.update_or_create(
         job=job,
         page=page,
@@ -360,7 +415,7 @@ def _sync_page_ocr(job: TranslationJob, page: DocumentPage, page_data: Dict[str,
             "text": page.extracted_text,
             "confidence": confidence,
             "status": OCRResult.Status.PENDING_REVIEW if confidences else OCRResult.Status.ACCEPTED,
-            "warnings": page_data.get("warnings", []) or page.metadata.get("warnings", []),
+            "warnings": all_warnings,
             "raw_data": page_data,
         },
     )

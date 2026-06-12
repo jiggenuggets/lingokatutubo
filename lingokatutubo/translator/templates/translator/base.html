@@ -4,51 +4,71 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}LingoKatutubo{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}LingoKatutubo — cross-lingual document translation for Bagobo-Tagabawa language preservation.{% endblock %}">
+    <title>{% block title %}LingoKatutubo{% endblock %} — LingoKatutubo</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Libre+Baskerville:wght@700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    {% block extra_css %}{% endblock %}
     <script src="{% static 'js/app.js' %}" defer></script>
+    {% block extra_js %}{% endblock %}
   </head>
   <body>
     <header class="site-header">
       <nav class="site-nav" aria-label="Primary">
         <a class="brand" href="{% url 'translator:home' %}">
-          <span class="brand-mark">BT</span>
-          <span>
-            <strong>Bagobo</strong>
-            <small>Translator</small>
+          <span class="brand-mark" aria-hidden="true">LK</span>
+          <span class="brand-text">
+            <strong>LingoKatutubo</strong>
+            <small>Bagobo-Tagabawa</small>
           </span>
         </a>
-        <div class="nav-links">
-          <a href="{% url 'translator:home' %}">Home</a>
-          <a href="{% url 'translator:translate' %}">Translate</a>
+
+        <button
+          class="nav-hamburger"
+          id="nav-hamburger"
+          type="button"
+          aria-label="Toggle navigation menu"
+          aria-expanded="false"
+          aria-controls="nav-links"
+        >
+          <span></span><span></span><span></span>
+        </button>
+
+        <div class="nav-links" id="nav-links" role="menubar">
+          <a href="{% url 'translator:home' %}" role="menuitem">Home</a>
+          <a href="{% url 'translator:translate' %}" role="menuitem">Translate</a>
           {% if request.user.is_authenticated %}
-            <a href="{% url 'translator:history' %}">History</a>
+            <a href="{% url 'translator:history' %}" role="menuitem">History</a>
           {% endif %}
-          <a href="{% url 'translator:about' %}">About</a>
+          <a href="{% url 'translator:about' %}" role="menuitem">About</a>
           {% if request.user.is_staff %}
-            <a href="/admin/">Admin</a>
+            <a href="/admin/" role="menuitem">Admin</a>
           {% endif %}
           {% if request.user.is_authenticated %}
-            <span class="nav-user">{{ request.user.username }}</span>
+            <span class="nav-user" aria-label="Signed in as {{ request.user.username }}">
+              {{ request.user.username }}
+            </span>
             <form class="logout-form" method="post" action="{% url 'translator:logout' %}">
               {% csrf_token %}
               <button type="submit">Log Out</button>
             </form>
           {% else %}
-            <a href="{% url 'translator:login' %}">Log In</a>
-            <a class="nav-cta" href="{% url 'translator:signup' %}">Sign Up</a>
+            <a href="{% url 'translator:login' %}" role="menuitem">Log In</a>
+            <a class="nav-cta" href="{% url 'translator:signup' %}" role="menuitem">Sign Up</a>
           {% endif %}
         </div>
       </nav>
     </header>
 
     {% if messages %}
-      <div class="messages">
+      <div class="messages" role="list" aria-label="Notifications">
         {% for message in messages %}
-          <p class="message {{ message.tags }}">{{ message }}</p>
+          <div class="message {{ message.tags }}" role="listitem" aria-live="polite">
+            <span>{{ message }}</span>
+            <button class="message-dismiss" type="button" aria-label="Dismiss notification">&#x2715;</button>
+          </div>
         {% endfor %}
       </div>
     {% endif %}
@@ -61,7 +81,7 @@
           <strong>LingoKatutubo</strong>
           <p>Document translation and bilingual review for Bagobo-Tagabawa language preservation.</p>
         </div>
-        <nav aria-label="Footer">
+        <nav aria-label="Footer navigation">
           <a href="{% url 'translator:home' %}">Home</a>
           <a href="{% url 'translator:translate' %}">Translate</a>
           {% if request.user.is_authenticated %}
