@@ -1,29 +1,51 @@
-# Python
+# Python virtual environments
+.venv/
+venv/
+env/
 lingokatutubo/backend/.venv/
-lingokatutubo/backend/__pycache__/
-lingokatutubo/backend/**/__pycache__/
 
-# Node / Next.js
-lingokatutubo/frontend/node_modules/
-lingokatutubo/frontend/.next/
-lingokatutubo/frontend/out/
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
 
 # Environment files
+.env
+.env.*
+!.env.example
 lingokatutubo/frontend/.env.local
 lingokatutubo/backend/.env
 
-# Generated files
+# Django / database
+db.sqlite3
+*.sqlite3
+media/
+staticfiles/
+
+# Uploads / generated outputs
+uploads/
+outputs/
+jobs/
 lingokatutubo/backend/jobs/
 lingokatutubo/backend/uploads/
 lingokatutubo/backend/outputs/
+
+# Node / frontend
+node_modules/
+.next/
+dist/
+build/
+out/
+lingokatutubo/frontend/node_modules/
+lingokatutubo/frontend/.next/
+lingokatutubo/frontend/out/
 
 # Logs
 *.log
 npm-debug.log*
 
-venv/
-__pycache__/
-*.pyc
-.env
+# OCR / Paddle generated files
 .paddlex/
-uploads/
+
+# Backup files
+*.bak
