@@ -49,3 +49,4 @@ npm-debug.log*
 
 # Backup files
 *.bak
+/lingokatutubo/package-lock.json

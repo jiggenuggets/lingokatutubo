@@ -124,24 +124,6 @@
         </select>
       </label>
 
-      <div class="ocr-languages-selector">
-        <span class="field-label">OCR Languages <span class="label-optional">(optional)</span></span>
-        <div class="checkbox-group">
-          {% for choice_value, choice_label in upload_form.ocr_languages_list.field.choices %}
-            <label class="checkbox-label">
-              <input type="checkbox" form="upload-form" name="ocr_languages_list" value="{{ choice_value }}"
-                     {% if choice_value == 'eng' or choice_value == 'fil' %}checked{% endif %}>
-              <span>{{ choice_label }}</span>
-            </label>
-          {% endfor %}
-        </div>
-      </div>
-
-      <label class="custom-ocr-label">
-        <span>Custom OCR Codes <span class="label-optional">(advanced fallback)</span></span>
-        <input form="upload-form" name="ocr_languages_custom" type="text" placeholder="e.g. eng+fil">
-      </label>
-
       <button id="translate-button" class="button primary full" form="upload-form" type="submit" disabled>
         Start Translation
       </button>

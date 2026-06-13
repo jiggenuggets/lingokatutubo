@@ -344,11 +344,18 @@
 
       if (!blocks.length) {
         detailsList.innerHTML = `<p class="muted">No structured text blocks for this page.</p>`;
+        detailsList.hidden = false;
       } else {
         detailsList.innerHTML = blocks.map((block) => {
           const source = block.source_text || block.original_text || "-";
-          const translated = block.translated_text || "UNKNOWN_FOR_REVIEW";
-          const needsReview = !block.translated_text || block.translated_text === "UNKNOWN_FOR_REVIEW";
+          const translated = block.translated_text || "[UNKNOWN_FOR_REVIEW]";
+          const translatedValue = text(translated);
+          const method = block.translation_method || block.cascade_stage || "unknown";
+          const confidence = Number(block.translation_confidence);
+          const confidenceText = Number.isFinite(confidence)
+            ? `${Math.round(confidence * 100)}%`
+            : "n/a";
+          const needsReview = !translatedValue || translatedValue.includes("UNKNOWN_FOR_REVIEW");
           return `
             <article class="detail-row">
               <div>
@@ -358,10 +365,12 @@
               <div>
                 <small>Translation</small>
                 <p class="${needsReview ? "needs-review" : ""}">${escapeHtml(translated)}</p>
+                <p class="detail-meta">Method: ${escapeHtml(method)} | Confidence: ${escapeHtml(confidenceText)}</p>
               </div>
             </article>
           `;
         }).join("");
+        detailsList.hidden = false;
       }
 
       const warnings = structure && Array.isArray(structure.warnings) ? structure.warnings : [];

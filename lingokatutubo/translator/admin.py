@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db.models import Avg, Count, Q
 
 from .models import (
     DatasetImportBatch,
@@ -51,6 +52,28 @@ class GeneratedOutputInline(admin.TabularInline):
     show_change_link = True
 
 
+class OCRQualityFilter(admin.SimpleListFilter):
+    title = "OCR quality"
+    parameter_name = "ocr_quality"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("low", "Low OCR confidence"),
+            ("warnings", "Has OCR warnings"),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == "low":
+            return queryset.filter(ocr_results__confidence__lt=0.6).distinct()
+
+        if self.value() == "warnings":
+            return queryset.exclude(ocr_results__warnings=[]).filter(
+                ocr_results__warnings__isnull=False
+            ).distinct()
+
+        return queryset
+
+
 @admin.register(TranslationJob)
 class TranslationJobAdmin(admin.ModelAdmin):
     list_display = (
@@ -61,18 +84,41 @@ class TranslationJobAdmin(admin.ModelAdmin):
         "progress",
         "extraction_method_display",
         "ocr_confidence_display",
+        "translation_confidence_display",
+        "review_segments_display",
         "source_language",
         "target_language",
         "is_deleted",
         "created_at",
     )
-    list_filter = ("status", "file_type", "source_language", "target_language", "is_deleted", "created_at")
+    list_filter = (
+        "status",
+        OCRQualityFilter,
+        "file_type",
+        "source_language",
+        "target_language",
+        "is_deleted",
+        "created_at",
+    )
     search_fields = ("id", "original_filename", "owner__username")
+    date_hierarchy = "created_at"
     readonly_fields = (
         "id", "created_at", "updated_at", "completed_at", "deleted_at",
         "extraction_method_display", "ocr_confidence_display",
+        "translation_confidence_display", "review_segments_display",
     )
     inlines = (DocumentPageInline, TranslationSegmentInline, GeneratedOutputInline)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(
+            admin_segment_count=Count("segments", distinct=True),
+            admin_review_segment_count=Count(
+                "segments",
+                filter=Q(segments__needs_review=True),
+                distinct=True,
+            ),
+            admin_translation_confidence=Avg("segments__confidence"),
+        )
 
     @admin.display(description="Extraction Method")
     def extraction_method_display(self, obj):
@@ -95,6 +141,35 @@ class TranslationJobAdmin(admin.ModelAdmin):
         pct = round(mean * 100)
         warning = " ⚠" if summary.get("has_low_quality_warning") else ""
         return f"{pct}%{warning}"
+
+    @admin.display(description="Translation Confidence")
+    def translation_confidence_display(self, obj):
+        confidence = getattr(obj, "admin_translation_confidence", None)
+        if confidence is None:
+            confidence = obj.segments.aggregate(value=Avg("confidence"))["value"]
+
+        if confidence is None:
+            return "N/A"
+
+        return f"{round(confidence * 100)}%"
+
+    @admin.display(description="Needs Review")
+    def review_segments_display(self, obj):
+        segment_count = getattr(obj, "admin_segment_count", None)
+        review_segment_count = getattr(obj, "admin_review_segment_count", None)
+
+        if segment_count is None or review_segment_count is None:
+            summary = obj.segments.aggregate(
+                segment_count=Count("id"),
+                review_segment_count=Count("id", filter=Q(needs_review=True)),
+            )
+            segment_count = summary["segment_count"]
+            review_segment_count = summary["review_segment_count"]
+
+        if not segment_count:
+            return "N/A"
+
+        return f"{review_segment_count}/{segment_count}"
 
 
 @admin.register(Language)

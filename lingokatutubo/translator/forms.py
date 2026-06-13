@@ -23,6 +23,8 @@ TARGET_LANGUAGE_CHOICES = [
     ("cebuano", "Cebuano"),
 ]
 
+DEFAULT_OCR_LANGUAGES = "eng+fil+ceb"
+
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".jpg", ".jpeg", ".png", ".txt"}
 ALLOWED_CONTENT_TYPES = {
     ".pdf": {"application/pdf", "application/x-pdf"},
@@ -42,67 +44,17 @@ class DocumentUploadForm(forms.Form):
     file = forms.FileField()
     source_language = forms.ChoiceField(choices=LANGUAGE_CHOICES, initial="auto")
     target_language = forms.ChoiceField(choices=TARGET_LANGUAGE_CHOICES, initial="tagabawa")
-    ocr_languages = forms.CharField(required=False, max_length=128, widget=forms.HiddenInput())
-    ocr_languages_list = forms.MultipleChoiceField(
-        choices=[],
-        widget=forms.CheckboxSelectMultiple,
-        required=False,
-    )
-    ocr_languages_custom = forms.CharField(
+    ocr_languages = forms.CharField(
         required=False,
         max_length=128,
+        widget=forms.HiddenInput(),
+        initial=DEFAULT_OCR_LANGUAGES,
     )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        choices = []
-        try:
-            from .services.ocr_stage.ocr_service import get_ocr_service
-            service = get_ocr_service()
-            installed = service.get_installed_languages()
-            for lang in installed:
-                label = {
-                    "eng": "English",
-                    "fil": "Filipino",
-                    "ceb": "Cebuano",
-                    "osd": "OSD",
-                }.get(lang, lang.upper())
-                choices.append((lang, f"{label} ({lang})"))
-        except Exception:
-            pass
-
-        fallbacks = [
-            ("eng", "English (eng)"),
-            ("fil", "Filipino (fil)"),
-            ("ceb", "Cebuano (ceb)"),
-            ("osd", "Orientation and Script Detection (osd)"),
-        ]
-        existing_codes = {c[0] for c in choices}
-        for code, label in fallbacks:
-            if code not in existing_codes:
-                choices.append((code, label))
-
-        self.fields["ocr_languages_list"].choices = choices
 
     def clean(self):
         cleaned_data = super().clean()
-        raw_ocr = cleaned_data.get("ocr_languages")
-        lst = cleaned_data.get("ocr_languages_list") or []
-        custom = cleaned_data.get("ocr_languages_custom") or ""
-
-        has_new_fields = "ocr_languages_list" in self.data or "ocr_languages_custom" in self.data
-        if has_new_fields:
-            parts = []
-            if lst:
-                parts.extend(lst)
-            if custom.strip():
-                custom_parts = [p.strip() for p in custom.replace(",", "+").split("+") if p.strip()]
-                for p in custom_parts:
-                    if p not in parts:
-                        parts.append(p)
-            cleaned_data["ocr_languages"] = "+".join(parts)
-        else:
-            cleaned_data["ocr_languages"] = raw_ocr or ""
+        raw_ocr = (cleaned_data.get("ocr_languages") or "").strip()
+        cleaned_data["ocr_languages"] = raw_ocr or DEFAULT_OCR_LANGUAGES
 
         return cleaned_data
 

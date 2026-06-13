@@ -64,6 +64,12 @@ def translate(request):
         .select_related("uploaded_document")
         .annotate(
             segment_count=Count("segments", distinct=True),
+            review_segment_count=Count(
+                "segments",
+                filter=Q(segments__needs_review=True),
+                distinct=True,
+            ),
+            translation_confidence=Avg("segments__confidence"),
             ocr_confidence=Avg("ocr_results__confidence"),
             page_count=Count("pages", distinct=True),
         )
@@ -116,6 +122,12 @@ def history(request):
         .select_related("uploaded_document")
         .annotate(
             segment_count=Count("segments", distinct=True),
+            review_segment_count=Count(
+                "segments",
+                filter=Q(segments__needs_review=True),
+                distinct=True,
+            ),
+            translation_confidence=Avg("segments__confidence"),
             ocr_confidence=Avg("ocr_results__confidence"),
             page_count=Count("pages", distinct=True),
             output_count=Count("generated_outputs", distinct=True),
@@ -153,6 +165,12 @@ def job_detail(request, job_id):
         .select_related("uploaded_document")
         .annotate(
             segment_count=Count("segments", distinct=True),
+            review_segment_count=Count(
+                "segments",
+                filter=Q(segments__needs_review=True),
+                distinct=True,
+            ),
+            translation_confidence=Avg("segments__confidence"),
             ocr_confidence=Avg("ocr_results__confidence"),
             page_count=Count("pages", distinct=True),
         )
@@ -185,6 +203,12 @@ def preview(request, job_id):
         .select_related("uploaded_document")
         .annotate(
             segment_count=Count("segments", distinct=True),
+            review_segment_count=Count(
+                "segments",
+                filter=Q(segments__needs_review=True),
+                distinct=True,
+            ),
+            translation_confidence=Avg("segments__confidence"),
             ocr_confidence=Avg("ocr_results__confidence"),
             page_count=Count("pages", distinct=True),
         )
@@ -232,7 +256,6 @@ def preview(request, job_id):
 @login_required
 @require_POST
 def api_translate(request):
-    print("DONT ENFORCE CSRF:", getattr(request, '_dont_enforce_csrf_checks', None))
     # 1. Active jobs limit check (Maximum 2 queued/processing jobs per user)
     active_jobs = TranslationJob.objects.filter(
         owner=request.user,
@@ -379,6 +402,7 @@ def api_preview(request, job_id):
         )
 
     metadata = job.metadata or {}
+    translation_quality = _translation_quality_context(job)
 
     original_pages = [
         _preview_image_url(job, item)
@@ -400,6 +424,8 @@ def api_preview(request, job_id):
             "original_pages": original_pages,
             "translated_pages": translated_pages,
             "page_count": max(len(original_pages), len(translated_pages)),
+            **translation_quality,
+            "translation_summary": translation_quality,
             "segments": [
                 {
                     "segment_index": segment.segment_index,
@@ -581,6 +607,7 @@ def _owned_jobs_queryset(request):
 def _job_payload(job: TranslationJob) -> dict:
     metadata = job.metadata or {}
     state = _job_state_context(job)
+    translation_quality = _translation_quality_context(job)
 
     return {
         "job_id": job.job_id,
@@ -605,6 +632,7 @@ def _job_payload(job: TranslationJob) -> dict:
         "can_download": state["can_download"],
         "is_processing": state["is_processing"],
         "has_failed": state["has_failed"],
+        **translation_quality,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
@@ -705,6 +733,7 @@ def _job_card_context(job: TranslationJob) -> dict:
     uploaded_document = _uploaded_document_for(job)
     ocr_summary = _ocr_summary(job)
     thumbnail = _thumbnail_context(job)
+    translation_quality = _translation_quality_context(job)
 
     context.update(
         {
@@ -721,9 +750,8 @@ def _job_card_context(job: TranslationJob) -> dict:
                 "ocr_confidence",
                 ocr_summary["confidence"],
             ),
-            "segment_count": int(
-                getattr(job, "segment_count", 0) or job.segments.count()
-            ),
+            **translation_quality,
+            "workflow_steps": _workflow_steps(job),
             "page_count": int(getattr(job, "page_count", 0) or job.pages.count()),
             "thumbnail_url": thumbnail["url"],
             "thumbnail_kind": thumbnail["kind"],
@@ -736,6 +764,105 @@ def _job_card_context(job: TranslationJob) -> dict:
     )
 
     return context
+
+
+def _translation_quality_context(job: TranslationJob) -> dict:
+    segment_count = _segment_count(job)
+    review_segment_count = _review_segment_count(job)
+    translation_confidence = _translation_confidence(job)
+
+    return {
+        "segment_count": segment_count,
+        "review_segment_count": review_segment_count,
+        "translation_confidence": translation_confidence,
+        "translation_confidence_pct": _confidence_pct(translation_confidence),
+        "translation_has_review_items": review_segment_count > 0,
+    }
+
+
+def _segment_count(job: TranslationJob) -> int:
+    return int(getattr(job, "segment_count", 0) or job.segments.count())
+
+
+def _review_segment_count(job: TranslationJob) -> int:
+    annotated = getattr(job, "review_segment_count", None)
+    if annotated is not None:
+        return int(annotated or 0)
+    return int(job.segments.filter(needs_review=True).count())
+
+
+def _translation_confidence(job: TranslationJob):
+    annotated = getattr(job, "translation_confidence", None)
+    if annotated is not None:
+        return annotated
+
+    aggregate = job.segments.aggregate(value=Avg("confidence"))
+    return aggregate["value"]
+
+
+def _translation_confidence_pct(job: TranslationJob):
+    return _confidence_pct(_translation_confidence(job))
+
+
+def _confidence_pct(confidence):
+    return round(confidence * 100) if confidence is not None else None
+
+
+def _workflow_steps(job: TranslationJob) -> list:
+    steps = [
+        ("uploaded", "Uploaded"),
+        ("extracting", "Extracting / OCR"),
+        ("translating", "Translating"),
+        ("output", "Generating Output"),
+        ("completed", "Completed"),
+    ]
+
+    if job.status == TranslationJob.Status.FAILED:
+        steps[-1] = ("failed", "Failed")
+        completed_index = _workflow_phase_index(job.current_phase)
+        active_index = None
+    elif job.status == TranslationJob.Status.COMPLETED:
+        completed_index = len(steps) - 1
+        active_index = None
+    elif job.status in {TranslationJob.Status.QUEUED, TranslationJob.Status.PROCESSING}:
+        active_index = _workflow_phase_index(job.current_phase)
+        completed_index = max(0, active_index - 1)
+    else:
+        completed_index = 0
+        active_index = None
+
+    output = []
+
+    for index, (key, label) in enumerate(steps):
+        if job.status == TranslationJob.Status.FAILED and index == len(steps) - 1:
+            state = "failed"
+        elif active_index == index:
+            state = "active"
+        elif index <= completed_index:
+            state = "complete"
+        else:
+            state = "pending"
+
+        output.append({"key": key, "label": label, "state": state})
+
+    return output
+
+
+def _workflow_phase_index(phase: str) -> int:
+    phase = str(phase or "").lower()
+    phase_map = {
+        "queued": 0,
+        "uploading": 0,
+        "detecting": 1,
+        "extracting": 1,
+        "ocr": 1,
+        "translating": 2,
+        "reconstructing": 3,
+        "preview_generation": 3,
+        "bilingual_output": 3,
+        "completed": 4,
+    }
+    return phase_map.get(phase, 1)
 
 
 def _uploaded_document_for(job: TranslationJob):
@@ -837,7 +964,7 @@ def _extraction_method_label(method: str) -> str:
         'plain_text': 'Plain Text',
         'hybrid': 'Hybrid (text + OCR)',
         'text_extraction': 'Text Extraction',
-    }.get(method, method.replace('_', ' ').title() if method else '-')
+    }.get(method, method.replace('_', ' ').title() if method else '—')
 
 
 def _status_label(status: str) -> str:

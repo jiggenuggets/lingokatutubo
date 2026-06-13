@@ -215,14 +215,15 @@ class PipelineService:
                 self._set_job_phase(job, "ocr")
                 ocr_summary_data: Optional[Dict[str, Any]] = None
                 try:
+                    ocr_dpi = getattr(self.ocr_service, "dpi", "default")
                     if file_type == FileType.PDF:
-                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR at {self.ocr_service.dpi} DPI")
+                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR at {ocr_dpi} DPI")
                         layout_data = self.ocr_service.extract_pdf_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
                         )
                     elif file_type in (FileType.JPG, FileType.PNG):
-                        print(f"[Pipeline] Image input - running Tesseract OCR at {self.ocr_service.dpi} DPI")
+                        print(f"[Pipeline] Image input - running Tesseract OCR at {ocr_dpi} DPI")
                         layout_data = self.ocr_service.extract_image_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
@@ -231,10 +232,26 @@ class PipelineService:
                         layout_data = []
 
                     # Phase 4: compute OCR quality summary after extraction
-                    ocr_summary_data = self.ocr_service._compute_page_ocr_summary(
-                        layout_data or [],
-                        self.ocr_service.low_confidence_threshold,
+                    low_confidence_threshold = getattr(
+                        self.ocr_service,
+                        "low_confidence_threshold",
+                        0.60,
                     )
+                    ocr_summary_func = getattr(
+                        self.ocr_service,
+                        "_compute_page_ocr_summary",
+                        None,
+                    )
+                    if callable(ocr_summary_func):
+                        ocr_summary_data = ocr_summary_func(
+                            layout_data or [],
+                            low_confidence_threshold,
+                        )
+                    else:
+                        ocr_summary_data = self._compute_page_ocr_summary(
+                            layout_data or [],
+                            low_confidence_threshold,
+                        )
                     job.metadata["extraction_method"] = "ocr_image"
                     job.metadata["ocr_summary"] = ocr_summary_data
                     if ocr_summary_data.get("has_low_quality_warning"):
@@ -463,6 +480,51 @@ class PipelineService:
             self._persist_job(job)
             print(f"[Pipeline] Job {job_id} failed: {e}")
             return False
+
+    @staticmethod
+    def _compute_page_ocr_summary(
+        pages_data: List[Dict[str, Any]],
+        low_confidence_threshold: float = 0.60,
+    ) -> Dict[str, Any]:
+        all_confs: List[float] = []
+        low_count = 0
+        total_blocks = 0
+
+        for page_data in pages_data:
+            for block in page_data.get("blocks", []):
+                raw = block.get("confidence")
+                if raw is None:
+                    continue
+                try:
+                    conf = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                all_confs.append(conf)
+                total_blocks += 1
+                if conf < low_confidence_threshold:
+                    low_count += 1
+
+        if not all_confs:
+            return {
+                "mean_confidence": None,
+                "min_confidence": None,
+                "low_confidence_block_count": 0,
+                "total_block_count": 0,
+                "has_low_quality_warning": False,
+                "page_count": len(pages_data),
+            }
+
+        mean_conf = round(sum(all_confs) / len(all_confs), 4)
+        min_conf = round(min(all_confs), 4)
+
+        return {
+            "mean_confidence": mean_conf,
+            "min_confidence": min_conf,
+            "low_confidence_block_count": low_count,
+            "total_block_count": total_blocks,
+            "has_low_quality_warning": mean_conf < low_confidence_threshold or low_count > 0,
+            "page_count": len(pages_data),
+        }
     
     def _translate_layout(
         self,
@@ -470,7 +532,7 @@ class PipelineService:
         source_lang: str,
         target_lang: str,
         translation_warnings: Optional[List[str]] = None,
-    ) -> Dict[str, Dict[str, str]]:
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Translate all text in layout data
         
@@ -1106,7 +1168,7 @@ class PipelineService:
     def _build_bilingual_first_page(
         self,
         layout_data: list,
-        translations: Dict[str, Dict[str, str]],
+        translations: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         blocks_output = []
         if not layout_data:
@@ -1118,21 +1180,37 @@ class PipelineService:
                 continue
 
             block_bbox = block.get("bbox")
-            for line in block.get("lines", []):
+            for line_index, line in enumerate(block.get("lines", [])):
                 original_text = line.get("text", "").strip()
                 if not original_text:
                     continue
 
                 block_id = f"0_{block_index}"
-                translated_text = (
-                    line.get("translation")
-                    or translations.get(block_id, {}).get("translated")
-                    or "UNKNOWN_FOR_REVIEW"
+                line_id = f"0_{block_index}_{line_index}"
+                record = (
+                    translations.get(line_id)
+                    or translations.get(original_text)
+                    or translations.get(original_text.strip())
+                    or translations.get(block_id)
+                    or {}
+                )
+                translated_text = line.get("translation") or record.get("translated") or UNKNOWN_FOR_REVIEW
+                method = record.get("method") or record.get("cascade_stage") or "unknown"
+                confidence = record.get("confidence")
+                needs_review = (
+                    not translated_text
+                    or UNKNOWN_FOR_REVIEW in str(translated_text)
+                    or method == "unknown_for_review"
                 )
                 blocks_output.append(
                     {
+                        "source_text": original_text,
                         "original_text": original_text,
                         "translated_text": translated_text,
+                        "translation_method": method,
+                        "cascade_stage": record.get("cascade_stage", method),
+                        "translation_confidence": confidence,
+                        "needs_review": needs_review,
                         "bbox": line.get("bbox") or block_bbox,
                     }
                 )

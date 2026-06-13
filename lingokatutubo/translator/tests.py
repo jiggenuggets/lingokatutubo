@@ -9,6 +9,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
+from .forms import DEFAULT_OCR_LANGUAGES
 from .models import (
     DocumentPage,
     GeneratedOutput,
@@ -102,6 +103,7 @@ class TranslatorAuthAndJobTests(TestCase):
         job = TranslationJob.objects.get()
         self.assertEqual(job.owner, self.alice)
         self.assertEqual(job.original_filename, "sample.pdf")
+        self.assertEqual(job.ocr_languages, DEFAULT_OCR_LANGUAGES)
         self.assertTrue(Path(job.upload_file_path).is_file())
         self.assertTrue(Path(job.input_file_path).is_file())
         self.assertEqual(
@@ -206,6 +208,31 @@ class TranslatorAuthAndJobTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["job_id"], job.job_id)
         self.assertEqual(payload["status"], TranslationJob.Status.QUEUED)
+
+    def test_translate_page_hides_ocr_language_controls(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:translate"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("Translation Settings", body)
+        self.assertNotIn("OCR Language Coverage", body)
+        self.assertNotIn("Used automatically for scanned PDFs and images.", body)
+        self.assertNotIn("ocr_languages_list", body)
+        self.assertNotIn("Custom OCR Codes", body)
+        self.assertNotIn("ocr_languages_custom", body)
+        self.assertNotIn("Orientation and Script Detection", body)
+        self.assertRegex(body, r'id="complete-actions"[^>]*hidden')
+        self.assertRegex(body, r'id="preview-link"[^>]*hidden')
+        self.assertRegex(body, r'id="download-link"[^>]*hidden')
+
+    def test_hidden_upload_actions_are_not_overridden_by_css(self):
+        styles_path = Path(__file__).resolve().parents[1] / "static" / "css" / "styles.css"
+        css = styles_path.read_text(encoding="utf-8")
+
+        self.assertIn("[hidden]", css)
+        self.assertIn("display: none !important", css)
 
     def test_user_cannot_read_another_users_job_status(self):
         job = self._create_job(self.alice)
@@ -322,6 +349,7 @@ class TranslatorAuthAndJobTests(TestCase):
             target_language="tagabawa",
             method="phrasebook_exact",
             confidence=0.88,
+            needs_review=True,
         )
         self.client.force_login(self.alice)
 
@@ -332,6 +360,18 @@ class TranslatorAuthAndJobTests(TestCase):
         self.assertIn("Original from database", body)
         self.assertIn("Translated from database", body)
         self.assertIn("phrasebook_exact", body)
+        self.assertIn("Confidence 0.88", body)
+        self.assertIn("Needs review", body)
+
+    def test_history_empty_state_has_upload_cta(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("No translated documents yet", body)
+        self.assertIn("Upload a Document", body)
 
     def test_pending_job_hides_preview_and_download_buttons(self):
         job = self._create_job(self.alice, status=TranslationJob.Status.QUEUED)
@@ -386,6 +426,11 @@ class TranslatorAuthAndJobTests(TestCase):
         body = detail_response.content.decode("utf-8")
         self.assertIn("Preview Bilingual", body)
         self.assertIn("Download</a>", body)
+        self.assertIn("Uploaded", body)
+        self.assertIn("Extracting / OCR", body)
+        self.assertIn("Translating", body)
+        self.assertIn("Generating Output", body)
+        self.assertIn("Completed", body)
         payload = status_response.json()
         self.assertTrue(payload["can_preview"])
         self.assertTrue(payload["can_download"])
@@ -425,6 +470,7 @@ class TranslatorAuthAndJobTests(TestCase):
         self.assertNotIn("Preview Bilingual", body)
         self.assertNotIn("Download</a>", body)
         self.assertIn("Translation failed safely", body)
+        self.assertIn("Failed", body)
 
     def test_preview_before_completion_redirects_to_job_detail(self):
         job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
@@ -474,6 +520,118 @@ class TranslatorAuthAndJobTests(TestCase):
         self.assertEqual(event.level, SystemEventLog.Level.ERROR)
         self.assertIn("OCR produced no text", event.message)
 
+    def test_phase_5b_translation_quality_summary_is_visible(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=1,
+            source_text="Known phrase",
+            translated_text="Known translation",
+            source_language="english",
+            target_language="tagabawa",
+            method="exact_phrase",
+            confidence=0.8,
+            needs_review=False,
+        )
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=2,
+            source_text="Unknown phrase",
+            translated_text="[UNKNOWN_FOR_REVIEW]",
+            source_language="english",
+            target_language="tagabawa",
+            method="unknown_for_review",
+            confidence=0.0,
+            needs_review=True,
+        )
+        original_preview = self._write_job_file(
+            job,
+            "preview",
+            "original_page_0.png",
+            b"\x89PNG\r\n\x1a\n",
+        )
+        translated_preview = self._write_job_file(
+            job,
+            "preview",
+            "translated_page_0.png",
+            b"\x89PNG\r\n\x1a\n",
+        )
+        job.metadata = {
+            "preview_original": [str(original_preview)],
+            "preview_translated": [str(translated_preview)],
+        }
+        job.save(update_fields=["metadata"])
+        self.client.force_login(self.alice)
+
+        detail_response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        preview_response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(detail_response.status_code, 200)
+        detail_body = detail_response.content.decode("utf-8")
+        self.assertIn("Translation Confidence", detail_body)
+        self.assertIn("40%", detail_body)
+        self.assertIn("Needs Review", detail_body)
+        self.assertIn("1 of 2", detail_body)
+
+        self.assertEqual(preview_response.status_code, 200)
+        preview_body = preview_response.content.decode("utf-8")
+        self.assertIn("Translation Details", preview_body)
+        self.assertIn("40%", preview_body)
+        self.assertIn("1 of 2", preview_body)
+
+    def test_phase_5b_quality_summary_is_exposed_by_status_and_preview_api(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=1,
+            source_text="Known phrase",
+            translated_text="Known translation",
+            source_language="english",
+            target_language="tagabawa",
+            method="exact_phrase",
+            confidence=0.8,
+            needs_review=False,
+        )
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=2,
+            source_text="Unknown phrase",
+            translated_text="[UNKNOWN_FOR_REVIEW]",
+            source_language="english",
+            target_language="tagabawa",
+            method="unknown_for_review",
+            confidence=0.0,
+            needs_review=True,
+        )
+        self.client.force_login(self.alice)
+
+        status_response = self.client.get(reverse("translator:status", args=[job.id]))
+        preview_response = self.client.get(
+            reverse("translator:preview_data", args=[job.id])
+        )
+
+        self.assertEqual(status_response.status_code, 200)
+        status_payload = status_response.json()
+        self.assertEqual(status_payload["segment_count"], 2)
+        self.assertEqual(status_payload["review_segment_count"], 1)
+        self.assertAlmostEqual(status_payload["translation_confidence"], 0.4)
+        self.assertEqual(status_payload["translation_confidence_pct"], 40)
+        self.assertTrue(status_payload["translation_has_review_items"])
+
+        self.assertEqual(preview_response.status_code, 200)
+        preview_payload = preview_response.json()
+        self.assertEqual(preview_payload["segment_count"], 2)
+        self.assertEqual(preview_payload["review_segment_count"], 1)
+        self.assertEqual(preview_payload["translation_confidence_pct"], 40)
+        self.assertEqual(preview_payload["translation_summary"]["segment_count"], 2)
+        self.assertEqual(
+            preview_payload["translation_summary"]["review_segment_count"],
+            1,
+        )
+        self.assertTrue(
+            preview_payload["translation_summary"]["translation_has_review_items"]
+        )
+
     def _create_job(self, owner, status=TranslationJob.Status.QUEUED, original_filename="sample.pdf"):
         return TranslationJob.objects.create(
             owner=owner,
@@ -488,6 +646,60 @@ class TranslatorAuthAndJobTests(TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
+
+
+class TranslatorPhase5BPipelineTests(TestCase):
+    def test_bilingual_first_page_uses_line_specific_translation_metadata(self):
+        from translator.services.pipeline_service import PipelineService
+        from translator.services.translation_dataset import UNKNOWN_FOR_REVIEW
+
+        service = PipelineService.__new__(PipelineService)
+        layout_data = [
+            {
+                "blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [0, 0, 100, 50],
+                        "lines": [
+                            {"text": "First line", "bbox": [0, 0, 100, 20]},
+                            {"text": "Second line", "bbox": [0, 24, 100, 44]},
+                        ],
+                    }
+                ]
+            }
+        ]
+        translations = {
+            "0_0": {
+                "translated": "Wrong block-level fallback",
+                "method": "legacy",
+                "cascade_stage": "legacy",
+                "confidence": 0.1,
+            },
+            "0_0_0": {
+                "translated": "First translated",
+                "method": "exact_phrase",
+                "cascade_stage": "exact_phrase",
+                "confidence": 1.0,
+            },
+            "0_0_1": {
+                "translated": UNKNOWN_FOR_REVIEW,
+                "method": "unknown_for_review",
+                "cascade_stage": "unknown_for_review",
+                "confidence": 0.0,
+            },
+        }
+
+        preview = service._build_bilingual_first_page(layout_data, translations)
+
+        self.assertEqual(len(preview["blocks"]), 2)
+        self.assertEqual(preview["blocks"][0]["translated_text"], "First translated")
+        self.assertEqual(preview["blocks"][0]["translation_method"], "exact_phrase")
+        self.assertEqual(preview["blocks"][0]["translation_confidence"], 1.0)
+        self.assertFalse(preview["blocks"][0]["needs_review"])
+        self.assertEqual(preview["blocks"][1]["translated_text"], UNKNOWN_FOR_REVIEW)
+        self.assertEqual(preview["blocks"][1]["translation_method"], "unknown_for_review")
+        self.assertEqual(preview["blocks"][1]["translation_confidence"], 0.0)
+        self.assertTrue(preview["blocks"][1]["needs_review"])
 
 
 # ============================================================
@@ -786,6 +998,69 @@ class TranslatorPhase4SystemTests(TestCase):
         job = self._create_job(self.alice, metadata=None)
         display = admin_instance.ocr_confidence_display(job)
         self.assertEqual(display, "N/A")
+
+    def test_admin_translation_quality_display_handles_segments_and_empty_jobs(self):
+        from translator.admin import TranslationJobAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        admin_site = AdminSite()
+        admin_instance = TranslationJobAdmin(TranslationJob, admin_site)
+        job = self._create_job(self.alice, metadata=None)
+
+        self.assertEqual(admin_instance.translation_confidence_display(job), "N/A")
+        self.assertEqual(admin_instance.review_segments_display(job), "N/A")
+
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=1,
+            source_text="Known phrase",
+            translated_text="Known translation",
+            source_language="english",
+            target_language="tagabawa",
+            method="exact_phrase",
+            confidence=0.8,
+            needs_review=False,
+        )
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=2,
+            source_text="Unknown phrase",
+            translated_text="[UNKNOWN_FOR_REVIEW]",
+            source_language="english",
+            target_language="tagabawa",
+            method="unknown_for_review",
+            confidence=0.0,
+            needs_review=True,
+        )
+
+        self.assertEqual(admin_instance.translation_confidence_display(job), "40%")
+        self.assertEqual(admin_instance.review_segments_display(job), "1/2")
+
+    def test_admin_ocr_quality_filter_finds_low_confidence_jobs(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from translator.admin import OCRQualityFilter, TranslationJobAdmin
+
+        low_job = self._create_job(self.alice, status="completed")
+        high_job = self._create_job(self.alice, status="completed")
+        OCRResult.objects.create(job=low_job, confidence=0.42, text="low")
+        OCRResult.objects.create(job=high_job, confidence=0.91, text="high")
+
+        admin_site = AdminSite()
+        admin_instance = TranslationJobAdmin(TranslationJob, admin_site)
+        request = RequestFactory().get("/admin/", {"ocr_quality": "low"})
+        request.user = self.alice
+        filter_spec = OCRQualityFilter(
+            request,
+            {"ocr_quality": ["low"]},
+            TranslationJob,
+            admin_instance,
+        )
+
+        queryset = filter_spec.queryset(request, TranslationJob.objects.all())
+
+        self.assertIn(low_job, queryset)
+        self.assertNotIn(high_job, queryset)
 
     def test_purge_deleted_job_files_dry_run(self):
         from django.core.management import call_command

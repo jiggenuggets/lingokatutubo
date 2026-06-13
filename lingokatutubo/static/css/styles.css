@@ -116,6 +116,10 @@ button, input, select, textarea {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 h1, h2, h3, h4 {
   margin-top: 0;
   line-height: var(--lh-heading);
@@ -1276,6 +1280,56 @@ h1 {
   margin: 0 0 var(--space-5);
 }
 
+.status-timeline {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  list-style: none;
+}
+
+.timeline-step {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-helper);
+  font-weight: 800;
+}
+
+.timeline-marker {
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+}
+
+.timeline-step.complete {
+  color: var(--primary-dark);
+}
+
+.timeline-step.complete .timeline-marker {
+  background: var(--success);
+}
+
+.timeline-step.active {
+  color: var(--secondary);
+}
+
+.timeline-step.active .timeline-marker {
+  background: var(--secondary);
+}
+
+.timeline-step.failed {
+  color: var(--danger);
+}
+
+.timeline-step.failed .timeline-marker {
+  background: var(--danger);
+}
+
 .job-meta-row {
   display: grid;
   grid-template-columns: 140px minmax(0, 1fr);
@@ -1475,10 +1529,28 @@ h1 {
   font-weight: 600;
 }
 
-.confidence-value {
-  margin: 2px 0 0;
-  font-size: var(--fs-helper);
-  color: var(--muted);
+.review-badge,
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: var(--space-2);
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-badge);
+  font-weight: 800;
+}
+
+.review-badge {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+
+.confidence-badge {
+  color: var(--primary-dark);
+  background: hsl(154 67% 25% / 0.08);
+  border: 1px solid hsl(154 67% 25% / 0.16);
 }
 
 
@@ -1613,6 +1685,13 @@ h1 {
 }
 
 .detail-row p { margin: 0; white-space: pre-wrap; line-height: var(--lh-body); }
+
+.detail-row .detail-meta {
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: var(--fs-helper);
+  font-weight: 700;
+}
 
 /* ==========================================================================
    19. CONFIRM DELETE PAGE
@@ -1930,6 +2009,10 @@ h1 {
   .confirm-delete-actions { flex-direction: column; }
   .confirm-delete-actions .button { width: 100%; }
 
+  .status-timeline { grid-template-columns: 1fr; }
+  .timeline-step { grid-template-columns: 32px minmax(0, 1fr); align-items: center; }
+  .timeline-marker { width: 24px; height: 24px; }
+
   .job-meta-row { grid-template-columns: 110px minmax(0, 1fr); }
 }
 
@@ -2058,51 +2141,5 @@ details[open] .ocr-warnings-summary::before { transform: rotate(90deg); }
 .ocr-warnings-list li {
   margin-bottom: var(--space-1);
   list-style: disc;
-}
-
-/* ================================================================
-   Phase 4 — OCR Selector Styles
-   ================================================================ */
-.ocr-languages-selector {
-  margin-top: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.ocr-languages-selector .field-label {
-  display: block;
-  font-size: var(--fs-small);
-  font-weight: 600;
-  color: var(--text-dark);
-  margin-bottom: var(--space-2);
-}
-
-.checkbox-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--paper);
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--fs-helper);
-  color: var(--text);
-  cursor: pointer;
-  user-select: none;
-}
-
-.checkbox-label input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-}
-
-.custom-ocr-label {
-  margin-top: var(--space-2);
 }
 

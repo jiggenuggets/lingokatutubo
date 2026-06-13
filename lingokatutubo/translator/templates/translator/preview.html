@@ -90,13 +90,13 @@
                 {{ segment.translated_text|default:"[UNKNOWN_FOR_REVIEW]" }}
               </p>
               {% if segment.needs_review %}
-                <small class="needs-review">Needs review</small>
+                <small class="review-badge">Needs review</small>
               {% endif %}
             </div>
             <div role="cell">
               <small>{{ segment.method|default:"unknown" }}</small>
               {% if segment.confidence is not None %}
-                <p class="confidence-value">{{ segment.confidence|floatformat:2 }}</p>
+                <p class="confidence-badge">Confidence {{ segment.confidence|floatformat:2 }}</p>
               {% else %}
                 <p class="text-muted">n/a</p>
               {% endif %}
@@ -186,6 +186,28 @@
           <dd>{{ segments|length }}</dd>
         </div>
         <div>
+          <dt>Translation Confidence</dt>
+          <dd>
+            {% if translation_confidence_pct is not None %}
+              {{ translation_confidence_pct }}%
+            {% else %}
+              <span class="text-muted">Not computed</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div>
+          <dt>Needs Review</dt>
+          <dd>
+            {% if segments %}
+              <span class="{% if translation_has_review_items %}needs-review{% endif %}">
+                {{ review_segment_count }} of {{ segments|length }}
+              </span>
+            {% else %}
+              <span class="text-muted">No segments</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div>
           <dt>Outputs</dt>
           <dd>{{ generated_outputs|length }}</dd>
         </div>
@@ -226,7 +248,7 @@
       </section>
 
       <details class="translation-details">
-        <summary>Layout Warnings</summary>
+        <summary>Translation Details</summary>
         <div id="details-list" hidden></div>
         <div id="structure-warnings" class="warning-box" hidden></div>
       </details>

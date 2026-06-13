@@ -83,6 +83,28 @@
                   <dt>Segments</dt>
                   <dd>{{ state.segment_count }}</dd>
                 </div>
+                <div>
+                  <dt>Translation Confidence</dt>
+                  <dd>
+                    {% if state.translation_confidence_pct is not None %}
+                      {{ state.translation_confidence_pct }}%
+                    {% else %}
+                      <span class="text-muted">—</span>
+                    {% endif %}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Needs Review</dt>
+                  <dd>
+                    {% if state.segment_count %}
+                      <span class="{% if state.translation_has_review_items %}needs-review{% endif %}">
+                        {{ state.review_segment_count }} of {{ state.segment_count }}
+                      </span>
+                    {% else %}
+                      <span class="text-muted">—</span>
+                    {% endif %}
+                  </dd>
+                </div>
               </dl>
 
               {% if state.has_failed %}

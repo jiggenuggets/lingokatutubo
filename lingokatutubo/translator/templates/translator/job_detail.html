@@ -32,6 +32,15 @@
     <section class="translation-details job-info-panel">
       <h2 class="section-heading">Job Information</h2>
 
+      <ol class="status-timeline" aria-label="Translation progress">
+        {% for step in workflow_steps %}
+          <li class="timeline-step {{ step.state }}">
+            <span class="timeline-marker" aria-hidden="true"></span>
+            <span>{{ step.label }}</span>
+          </li>
+        {% endfor %}
+      </ol>
+
       <dl class="job-meta-list">
         <div class="job-meta-row">
           <dt>Status</dt>
@@ -122,6 +131,30 @@
         <div class="job-meta-row">
           <dt>Segments</dt>
           <dd>{{ segment_count }}</dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Translation Confidence</dt>
+          <dd>
+            {% if translation_confidence_pct is not None %}
+              {{ translation_confidence_pct }}%
+            {% else %}
+              <span class="text-muted">Not computed</span>
+            {% endif %}
+          </dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Needs Review</dt>
+          <dd>
+            {% if segment_count %}
+              <span class="{% if translation_has_review_items %}needs-review{% endif %}">
+                {{ review_segment_count }} of {{ segment_count }}
+              </span>
+            {% else %}
+              <span class="text-muted">No segments</span>
+            {% endif %}
+          </dd>
         </div>
       </dl>
 

@@ -6,11 +6,13 @@ across ALL pages instead of checking only the first 3 pages for *any* text.
 A PDF that yields an average of fewer than MIN_CHARS_PER_PAGE meaningful
 characters is treated as scanned even if a tiny text layer exists (e.g. a
 single invisible watermark character per page does not make the document
-"digital").
+"digital"). Real low-text PDFs with visible text spans are still routed to
+native extraction instead of OCR.
 """
 
 import fitz  # PyMuPDF
 from PIL import Image
+from pathlib import Path
 from typing import Optional, Tuple
 from .models import DetectionType, FileType
 
@@ -47,6 +49,41 @@ class DetectionService:
             print(f"[Detection] Error counting PDF text chars: {e}")
             return 0, 1
 
+    @staticmethod
+    def _has_visible_pdf_text(pdf_path: str) -> bool:
+        """Return True when a low-text PDF still has visible text spans."""
+        if not Path(pdf_path).exists():
+            return False
+
+        try:
+            doc = fitz.open(pdf_path)
+            try:
+                for page in doc:
+                    data = page.get_text("dict")
+                    for block in data.get("blocks", []):
+                        if block.get("type") != 0:
+                            continue
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                text = str(span.get("text") or "").strip()
+                                if not text:
+                                    continue
+                                bbox = span.get("bbox") or []
+                                if len(bbox) != 4:
+                                    continue
+                                width = float(bbox[2]) - float(bbox[0])
+                                height = float(bbox[3]) - float(bbox[1])
+                                if width <= 1 or height <= 1:
+                                    continue
+                                if float(span.get("size") or 0) < 3:
+                                    continue
+                                return True
+            finally:
+                doc.close()
+        except Exception as e:
+            print(f"[Detection] Error checking visible PDF text: {e}")
+        return False
+
     @classmethod
     def detect_pdf_type(cls, pdf_path: str) -> DetectionType:
         """Detect if PDF is digital (has text layer) or scanned (image only).
@@ -64,7 +101,12 @@ class DetectionService:
         try:
             total_chars, page_count = cls._count_pdf_text_chars(pdf_path)
             avg_chars = total_chars / max(page_count, 1)
-            is_digital = avg_chars >= MIN_CHARS_PER_PAGE
+            has_visible_text = (
+                avg_chars > 0
+                and avg_chars < MIN_CHARS_PER_PAGE
+                and cls._has_visible_pdf_text(pdf_path)
+            )
+            is_digital = avg_chars >= MIN_CHARS_PER_PAGE or has_visible_text
             print(
                 f"[Detection] PDF text chars: {total_chars} across {page_count} page(s) "
                 f"(avg {avg_chars:.1f}/page) -> {'DIGITAL' if is_digital else 'SCANNED'}"
