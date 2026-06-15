@@ -1,13 +1,17 @@
 import json
+import sys
 import tempfile
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
 from .forms import DEFAULT_OCR_LANGUAGES
 from .models import (
@@ -233,6 +237,43 @@ class TranslatorAuthAndJobTests(TestCase):
 
         self.assertIn("[hidden]", css)
         self.assertIn("display: none !important", css)
+
+    def test_upload_warning_behavior_is_limited_to_active_upload(self):
+        script_path = Path(__file__).resolve().parents[1] / "static" / "js" / "app.js"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Your document is still uploading. Leaving now may cancel the upload.",
+            script,
+        )
+        self.assertIn('window.addEventListener("beforeunload", beforeUnloadHandler)', script)
+        self.assertIn('window.removeEventListener("beforeunload", beforeUnloadHandler)', script)
+        self.assertIn("if (!isUploading || currentJobId) return undefined", script)
+        self.assertIn("if (!file || isSubmitting) return", script)
+
+    def test_polling_controller_stops_on_terminal_status(self):
+        script_path = Path(__file__).resolve().parents[1] / "static" / "js" / "app.js"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn('const terminalStatuses = new Set(["completed", "failed"])', script)
+        self.assertIn("if (terminalStatuses.has(status) || !activeStatuses.has(status))", script)
+        self.assertIn("this.stop()", script)
+
+    def test_duplicate_polling_is_prevented(self):
+        script_path = Path(__file__).resolve().parents[1] / "static" / "js" / "app.js"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("const controllers = new Map()", script)
+        self.assertIn("if (controllers.has(key))", script)
+        self.assertIn("return controllers.get(key)", script)
+
+    def test_polling_resumes_when_visible(self):
+        script_path = Path(__file__).resolve().parents[1] / "static" / "js" / "app.js"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn('document.addEventListener("visibilitychange"', script)
+        self.assertIn("if (!document.hidden", script)
+        self.assertIn("document.hidden ? hiddenDelay : visibleDelay", script)
 
     def test_user_cannot_read_another_users_job_status(self):
         job = self._create_job(self.alice)
@@ -632,6 +673,124 @@ class TranslatorAuthAndJobTests(TestCase):
             preview_payload["translation_summary"]["translation_has_review_items"]
         )
 
+    def test_retrying_status_api_is_active_state(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.RETRYING)
+        job.current_phase = "retrying"
+        job.current_step = "Retrying abandoned translation job"
+        job.phase_message = "This job was queued for retry."
+        job.save()
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:status", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], TranslationJob.Status.RETRYING)
+        self.assertTrue(payload["is_processing"])
+        self.assertEqual(payload["message"], "This job was queued for retry.")
+
+    def test_status_api_returns_consistent_fields_for_all_states(self):
+        self.client.force_login(self.alice)
+        required_fields = {
+            "status",
+            "progress_percent",
+            "current_phase",
+            "current_step",
+            "phase_message",
+            "updated_at",
+            "started_at",
+            "completed_at",
+            "error",
+            "can_preview",
+            "can_download",
+        }
+
+        for status in [
+            TranslationJob.Status.QUEUED,
+            TranslationJob.Status.PROCESSING,
+            TranslationJob.Status.RETRYING,
+            TranslationJob.Status.COMPLETED,
+            TranslationJob.Status.FAILED,
+        ]:
+            job = self._create_job(
+                self.alice,
+                status=status,
+                original_filename=f"{status}.pdf",
+            )
+            if status == TranslationJob.Status.FAILED:
+                job.error = "Failed for test"
+                job.save(update_fields=["error"])
+
+            response = self.client.get(reverse("translator:status", args=[job.id]))
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(required_fields.issubset(payload.keys()))
+            self.assertEqual(payload["status"], status)
+            self.assertIsNotNone(payload["started_at"])
+            if status == TranslationJob.Status.FAILED:
+                self.assertEqual(payload["error"], "Failed for test")
+
+    def test_active_job_banner_is_owner_scoped(self):
+        self._create_job(self.alice, status=TranslationJob.Status.PROCESSING, original_filename="alice.pdf")
+        self._create_job(self.bob, status=TranslationJob.Status.PROCESSING, original_filename="bob.pdf")
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("1 document is currently processing.", body)
+        self.assertIn("alice.pdf", body)
+        self.assertNotIn("bob.pdf", body)
+        self.assertIn("View Status", body)
+        self.assertIn("History", body)
+
+    def test_start_translation_job_dispatches_after_commit(self):
+        from translator.services import start_translation_job
+
+        job = self._create_job(self.alice, status=TranslationJob.Status.QUEUED)
+        job.input_file_path = str(self.media_root / "sample.pdf")
+        job.save(update_fields=["input_file_path"])
+
+        with patch("translator.services.register_pipeline_callback"), patch(
+            "translator.services.submit_translation_task"
+        ) as submit_task:
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                start_translation_job(job)
+
+            submit_task.assert_not_called()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        submit_task.assert_called_once()
+        self.assertEqual(submit_task.call_args.args[1], job.job_id)
+
+    def test_duplicate_task_is_ignored_safely(self):
+        from translator.services import _run_translation_job
+
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+
+        with patch("translator.services._get_pipeline_service") as pipeline_service:
+            _run_translation_job(
+                job.job_id,
+                job.input_file_path,
+                "pdf",
+                "auto",
+                "tagabawa",
+                None,
+            )
+
+        pipeline_service.assert_not_called()
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.PROCESSING)
+        self.assertTrue(
+            SystemEventLog.objects.filter(
+                job=job,
+                event_type="translation_job_duplicate_ignored",
+            ).exists()
+        )
+
     def _create_job(self, owner, status=TranslationJob.Status.QUEUED, original_filename="sample.pdf"):
         return TranslationJob.objects.create(
             owner=owner,
@@ -825,6 +984,75 @@ class TranslatorPhase4SystemTests(TestCase):
         self.assertEqual(job.status, TranslationJob.Status.FAILED)
         self.assertIn("Tesseract failed catastrophically", job.error)
 
+    @patch("translator.services._get_pipeline_service")
+    def test_ocr_timeout_sets_failed_status(self, mock_pipeline):
+        from translator.services import _run_translation_job
+
+        mock_pipeline.side_effect = TimeoutError("Tesseract OCR timed out")
+        job = self._create_job(self.alice, status=TranslationJob.Status.QUEUED)
+
+        _run_translation_job(
+            job.job_id,
+            job.input_file_path,
+            "pdf",
+            "auto",
+            "tagabawa",
+            None,
+        )
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.FAILED)
+        self.assertIn("Tesseract OCR timed out", job.error)
+        self.assertTrue(
+            SystemEventLog.objects.filter(
+                job=job,
+                event_type="translation_job_failed",
+            ).exists()
+        )
+
+    def test_stale_processing_job_is_recovered(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        old_updated_at = timezone.now() - timezone.timedelta(minutes=30)
+        TranslationJob.objects.filter(id=job.id).update(updated_at=old_updated_at)
+
+        dry_output = StringIO()
+        call_command("recover_stale_jobs", minutes=15, dry_run=True, stdout=dry_output)
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.PROCESSING)
+        self.assertIn("fail:", dry_output.getvalue())
+
+        output = StringIO()
+        call_command("recover_stale_jobs", minutes=15, stdout=output)
+        job.refresh_from_db()
+        self.assertEqual(job.status, TranslationJob.Status.FAILED)
+        self.assertIn("abandoned", job.error)
+        self.assertIn("Recovered 1 stale job", output.getvalue())
+        self.assertTrue(
+            SystemEventLog.objects.filter(
+                job=job,
+                event_type="translation_job_stale_recovery",
+            ).exists()
+        )
+
+    def test_recover_stale_jobs_skips_completed_and_deleted_jobs(self):
+        old_updated_at = timezone.now() - timezone.timedelta(minutes=30)
+        completed = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        deleted = self._create_job(self.alice, status=TranslationJob.Status.PROCESSING)
+        deleted.is_deleted = True
+        deleted.save(update_fields=["is_deleted"])
+        TranslationJob.objects.filter(id__in=[completed.id, deleted.id]).update(
+            updated_at=old_updated_at
+        )
+
+        output = StringIO()
+        call_command("recover_stale_jobs", minutes=15, stdout=output)
+
+        completed.refresh_from_db()
+        deleted.refresh_from_db()
+        self.assertEqual(completed.status, TranslationJob.Status.COMPLETED)
+        self.assertEqual(deleted.status, TranslationJob.Status.PROCESSING)
+        self.assertIn("No stale translation jobs found", output.getvalue())
+
     def test_upload_invalid_file_rejected(self):
         self.client.force_login(self.alice)
         bad_file = SimpleUploadedFile("danger.exe", b"binary content", content_type="application/octet-stream")
@@ -867,6 +1095,57 @@ class TranslatorPhase4SystemTests(TestCase):
         response = self.client.post(reverse("translator:upload"), {"file": ""})
         self.assertEqual(response.status_code, 400)
         self.assertIn("upload limit", response.json()["detail"])
+
+    def test_health_page_is_staff_only(self):
+        staff = User.objects.create_user(
+            username="healthstaff",
+            email="healthstaff@example.test",
+            password=self.password,
+            is_staff=True,
+        )
+        checks = [{"name": "Database", "status": "ok", "detail": "sqlite"}]
+        counts = {"queued": 0, "processing": 0, "retrying": 0, "stale": 0}
+
+        response = self.client.get(reverse("translator:health"))
+        self.assertEqual(response.status_code, 302)
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:health"))
+        self.assertEqual(response.status_code, 302)
+
+        self.client.force_login(staff)
+        with patch("translator.views._health_checks", return_value=checks), patch(
+            "translator.views._health_job_counts", return_value=counts
+        ):
+            response = self.client.get(reverse("translator:health"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("System Health", body)
+        self.assertIn("Database", body)
+
+    def test_unavailable_redis_and_celery_are_reported_safely(self):
+        from translator import views
+
+        class BrokenRedis:
+            @classmethod
+            def from_url(cls, *args, **kwargs):
+                raise RuntimeError("redis down")
+
+        fake_redis_module = SimpleNamespace(Redis=BrokenRedis)
+        with override_settings(CELERY_BROKER_URL="redis://:secret@localhost:6379/0"):
+            with patch.dict(sys.modules, {"redis": fake_redis_module}):
+                redis_check = views._redis_health()
+
+        self.assertEqual(redis_check["status"], "error")
+        self.assertIn("redis://localhost:6379/0", redis_check["detail"])
+        self.assertNotIn("secret", redis_check["detail"])
+
+        with patch("lingokatutubo_django.celery.app.control.ping", return_value=[]):
+            celery_check = views._celery_worker_health()
+
+        self.assertEqual(celery_check["status"], "warning")
+        self.assertIn("No workers responded", celery_check["detail"])
 
     def test_preview_hidden_before_completed(self):
         job = self._create_job(self.alice, status="processing")

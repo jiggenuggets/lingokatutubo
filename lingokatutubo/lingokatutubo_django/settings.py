@@ -61,6 +61,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "translator.context_processors.active_translation_jobs",
             ],
         },
     },
@@ -139,6 +140,20 @@ LINGOKATUTUBO_MAX_UPLOAD_BYTES = int(
     os.environ.get("LINGOKATUTUBO_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))
 )
 LINGOKATUTUBO_TASK_MODE = os.environ.get("LINGOKATUTUBO_TASK_MODE", "thread")
+LINGOKATUTUBO_TASK_TIMEOUT_SECONDS = int(
+    os.environ.get("LINGOKATUTUBO_TASK_TIMEOUT_SECONDS", "900")
+)
+LINGOKATUTUBO_OCR_TIMEOUT_SECONDS = int(
+    os.environ.get("LINGOKATUTUBO_OCR_TIMEOUT_SECONDS", "120")
+)
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = LINGOKATUTUBO_TASK_TIMEOUT_SECONDS
+CELERY_TASK_SOFT_TIME_LIMIT = max(1, LINGOKATUTUBO_TASK_TIMEOUT_SECONDS - 30)
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 
 if not DEBUG:
     SESSION_COOKIE_SECURE = True

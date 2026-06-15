@@ -60,6 +60,7 @@ class LanguagePair(TimestampedModel):
 class TranslationJob(models.Model):
     class Status(models.TextChoices):
         QUEUED = "queued", "Queued"
+        RETRYING = "retrying", "Retrying"
         PROCESSING = "processing", "Processing"
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"

@@ -4,7 +4,7 @@ import os
 from typing import Any, Dict, Optional
 
 from django.conf import settings
-from django.db import close_old_connections
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from translator.models import (
@@ -113,6 +113,11 @@ def sync_pipeline_job(pipeline_job) -> None:
         updates["file_type"] = _enum_value(pipeline_job.file_type)
     if completed_at:
         updates["completed_at"] = timezone.make_aware(completed_at) if timezone.is_naive(completed_at) else completed_at
+    elif updates["status"] in {
+        TranslationJob.Status.COMPLETED,
+        TranslationJob.Status.FAILED,
+    }:
+        updates["completed_at"] = timezone.now()
 
     TranslationJob.objects.filter(id=job_id).update(**updates)
     if updates["status"] == TranslationJob.Status.FAILED:
@@ -133,8 +138,7 @@ def register_pipeline_callback() -> None:
 def start_translation_job(job: TranslationJob) -> None:
     register_pipeline_callback()
     file_type = _get_file_type_enum()(job.file_type)
-    submit_translation_task(
-        _run_translation_job,
+    args = (
         job.job_id,
         job.input_file_path,
         file_type.value,
@@ -142,6 +146,27 @@ def start_translation_job(job: TranslationJob) -> None:
         job.target_language,
         job.ocr_languages or None,
     )
+
+    def dispatch() -> None:
+        try:
+            submit_translation_task(_run_translation_job, *args)
+            SystemEventLog.objects.create(
+                actor=job.owner,
+                job=job,
+                event_type="translation_job_dispatched",
+                message="Translation job dispatched to the background runner.",
+                metadata={
+                    "task_mode": getattr(settings, "LINGOKATUTUBO_TASK_MODE", "thread"),
+                },
+            )
+        except Exception as exc:
+            _fail_translation_job(
+                job.job_id,
+                f"Translation worker dispatch failed: {exc}",
+                event_type="translation_job_dispatch_failed",
+            )
+
+    transaction.on_commit(dispatch)
 
 
 def _run_translation_job(
@@ -154,6 +179,8 @@ def _run_translation_job(
 ) -> None:
     close_old_connections()
     try:
+        if not _claim_translation_job(job_id):
+            return
         register_pipeline_callback()
         file_type_enum = (
             file_type
@@ -171,14 +198,7 @@ def _run_translation_job(
             )
         )
     except Exception as exc:
-        TranslationJob.objects.filter(id=job_id).update(
-            status=TranslationJob.Status.FAILED,
-            error=str(exc),
-            phase_message=str(exc),
-            current_step="Translation failed",
-            updated_at=timezone.now(),
-        )
-        _log_failed_job(job_id, str(exc))
+        _fail_translation_job(job_id, str(exc))
     finally:
         close_old_connections()
 
@@ -442,14 +462,88 @@ def _coerce_float(value: Any) -> Optional[float]:
         return None
 
 
-def _log_failed_job(job_id: str, message: str) -> None:
+def _claim_translation_job(job_id: str) -> bool:
+    now = timezone.now()
+    claimed = TranslationJob.objects.filter(
+        id=job_id,
+        is_deleted=False,
+        status__in=[TranslationJob.Status.QUEUED, TranslationJob.Status.RETRYING],
+    ).update(
+        status=TranslationJob.Status.PROCESSING,
+        progress=5,
+        current_phase="queued",
+        current_step="Worker accepted the job",
+        phase_message="Translation worker accepted the job.",
+        error="",
+        updated_at=now,
+    )
+    if claimed:
+        try:
+            job = TranslationJob.objects.get(id=job_id)
+        except TranslationJob.DoesNotExist:
+            return False
+        SystemEventLog.objects.create(
+            actor=job.owner,
+            job=job,
+            event_type="translation_job_started",
+            message="Translation worker claimed the job for processing.",
+        )
+        return True
+
+    try:
+        job = TranslationJob.objects.get(id=job_id)
+    except TranslationJob.DoesNotExist:
+        return False
+
+    SystemEventLog.objects.create(
+        actor=job.owner,
+        job=job,
+        level=SystemEventLog.Level.WARNING,
+        event_type="translation_job_duplicate_ignored",
+        message=(
+            "Duplicate translation task was ignored because the job was not "
+            "queued or retrying."
+        ),
+        metadata={"status": job.status},
+    )
+    return False
+
+
+def _fail_translation_job(
+    job_id: str,
+    message: str,
+    *,
+    event_type: str = "translation_job_failed",
+) -> None:
+    now = timezone.now()
+    safe_message = message or "Translation job failed."
+    TranslationJob.objects.filter(id=job_id).exclude(
+        status=TranslationJob.Status.COMPLETED
+    ).update(
+        status=TranslationJob.Status.FAILED,
+        error=safe_message,
+        phase_message=safe_message,
+        current_step="Translation failed",
+        current_phase="failed",
+        updated_at=now,
+        completed_at=now,
+    )
+    _log_failed_job(job_id, safe_message, event_type=event_type)
+
+
+def _log_failed_job(
+    job_id: str,
+    message: str,
+    *,
+    event_type: str = "translation_job_failed",
+) -> None:
     try:
         job = TranslationJob.objects.get(id=job_id)
     except TranslationJob.DoesNotExist:
         return
     if SystemEventLog.objects.filter(
         job=job,
-        event_type="translation_job_failed",
+        event_type=event_type,
         message=message or "Translation job failed.",
     ).exists():
         return
@@ -457,6 +551,6 @@ def _log_failed_job(job_id: str, message: str) -> None:
         actor=job.owner,
         job=job,
         level=SystemEventLog.Level.ERROR,
-        event_type="translation_job_failed",
+        event_type=event_type,
         message=message or "Translation job failed.",
     )

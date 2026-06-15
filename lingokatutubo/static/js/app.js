@@ -1,7 +1,11 @@
 (function () {
+  const activeStatuses = new Set(["queued", "processing", "retrying"]);
+  const terminalStatuses = new Set(["completed", "failed"]);
+
   const phaseLabels = {
     uploading: "Uploading",
     queued: "Queued for processing",
+    retrying: "Retrying",
     detecting: "Detecting document",
     extracting: "Extracting text and layout",
     ocr: "Running OCR",
@@ -16,6 +20,7 @@
   const phaseProgress = {
     uploading: 3,
     queued: 5,
+    retrying: 5,
     detecting: 15,
     extracting: 30,
     ocr: 45,
@@ -25,6 +30,8 @@
     bilingual_output: 95,
     completed: 100,
   };
+
+  const controllers = new Map();
 
   function text(value) {
     return value == null ? "" : String(value);
@@ -50,6 +57,12 @@
     return text(value).trim().toLowerCase();
   }
 
+  function statusLabel(value) {
+    const status = normalizeStatus(value);
+    if (status === "queued") return "Pending";
+    return phaseLabels[status] || (status ? status.charAt(0).toUpperCase() + status.slice(1) : "Unknown");
+  }
+
   function progressFor(data) {
     const phase = normalizeStatus(data.current_phase || data.status);
     const raw = data.progress_percent != null ? data.progress_percent : data.progress;
@@ -69,9 +82,165 @@
     return names[key] || text(value);
   }
 
-  /* =========================================================
-     Upload workflow
-  ========================================================= */
+  function formatDateTime(value) {
+    if (!value) return "Not available";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return text(value);
+    return date.toLocaleString([], {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function nowLabel() {
+    return new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function setHidden(element, hidden) {
+    if (element) element.hidden = hidden;
+  }
+
+  function setText(element, value) {
+    if (element) element.textContent = value;
+  }
+
+  function setError(errorBox, message) {
+    if (!errorBox) return;
+    errorBox.hidden = !message;
+    errorBox.textContent = message || "";
+  }
+
+  class PollingController {
+    constructor(key, statusUrl, handlers) {
+      this.key = key;
+      this.statusUrl = statusUrl;
+      this.handlers = handlers || {};
+      this.timer = null;
+      this.inFlight = false;
+      this.stopped = false;
+      this.failureCount = 0;
+      this.lastData = null;
+      this.boundVisibilityHandler = () => this.handleVisibilityChange();
+      document.addEventListener("visibilitychange", this.boundVisibilityHandler);
+    }
+
+    static start(key, statusUrl, handlers) {
+      if (controllers.has(key)) {
+        return controllers.get(key);
+      }
+      const controller = new PollingController(key, statusUrl, handlers);
+      controllers.set(key, controller);
+      controller.poll(0);
+      return controller;
+    }
+
+    stop() {
+      this.stopped = true;
+      if (this.timer) {
+        window.clearTimeout(this.timer);
+        this.timer = null;
+      }
+      document.removeEventListener("visibilitychange", this.boundVisibilityHandler);
+      controllers.delete(this.key);
+    }
+
+    handleVisibilityChange() {
+      if (this.stopped) return;
+      if (!document.hidden && this.lastData && activeStatuses.has(normalizeStatus(this.lastData.status))) {
+        this.schedule(0);
+      }
+    }
+
+    schedule(delay) {
+      if (this.stopped) return;
+      if (this.timer) window.clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => this.poll(), delay);
+    }
+
+    nextDelay() {
+      const visibleDelay = this.failureCount ? 3000 : 1500;
+      const hiddenDelay = this.failureCount ? 15000 : 10000;
+      return document.hidden ? hiddenDelay : visibleDelay;
+    }
+
+    poll(delayOverride) {
+      if (this.stopped || this.inFlight) return;
+      if (typeof delayOverride === "number" && delayOverride > 0) {
+        this.schedule(delayOverride);
+        return;
+      }
+      this.inFlight = true;
+      fetch(this.statusUrl, { credentials: "same-origin" })
+        .then((response) => {
+          if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
+          return response.json();
+        })
+        .then((data) => {
+          this.failureCount = 0;
+          this.lastData = data;
+          if (this.handlers.onUpdate) this.handlers.onUpdate(data);
+          if (this.handlers.onNetworkState) this.handlers.onNetworkState("", data);
+          const status = normalizeStatus(data.status);
+          if (terminalStatuses.has(status) || !activeStatuses.has(status)) {
+            if (this.handlers.onTerminal) this.handlers.onTerminal(data);
+            this.stop();
+            return;
+          }
+          this.schedule(this.nextDelay());
+        })
+        .catch((error) => {
+          this.failureCount += 1;
+          if (this.handlers.onNetworkState) {
+            this.handlers.onNetworkState(
+              `${error.message || "Could not reach the server."} Retrying status check...`,
+              this.lastData
+            );
+          }
+          this.schedule(this.nextDelay());
+        })
+        .finally(() => {
+          this.inFlight = false;
+        });
+    }
+  }
+
+  window.LingoKatutuboPolling = {
+    activeStatuses,
+    controllers,
+    start: PollingController.start,
+  };
+
+  function updateProgressDom(elements, data) {
+    const phase = normalizeStatus(data.current_phase || data.status || "queued");
+    const status = normalizeStatus(data.status);
+    const percent = progressFor(data);
+    const message = data.phase_message || data.message || phaseLabels[phase] || "";
+    setHidden(elements.progressCard, false);
+    setText(elements.title, phaseLabels[phase] || data.current_step || statusLabel(status));
+    setText(elements.message, message);
+    setText(elements.percent, `${percent}%`);
+    if (elements.fill) elements.fill.style.width = `${percent}%`;
+    if (elements.progressbar) elements.progressbar.setAttribute("aria-valuenow", String(percent));
+    setText(elements.step, data.current_step || phaseLabels[phase] || statusLabel(status));
+  }
+
+  function updateLanguageDom(element, data) {
+    if (!element || !data.detected_language) return;
+    const confidence = data.detection_confidence != null
+      ? ` (${Math.round(Number(data.detection_confidence) * 100)}% confidence)`
+      : "";
+    element.textContent = `Detected source language: ${languageName(data.detected_language)}${confidence}`;
+    element.hidden = false;
+  }
+
   function initUpload() {
     const form = document.getElementById("upload-form");
     if (!form) return;
@@ -84,106 +253,85 @@
     const errorBox = document.getElementById("upload-error");
     const button = document.getElementById("translate-button");
     const progressCard = document.getElementById("progress-card");
-    const progressTitle = document.getElementById("progress-title");
-    const progressMessage = document.getElementById("progress-message");
-    const progressPercent = document.getElementById("progress-percent");
     const progressFill = document.getElementById("progress-fill");
-    const progressStep = document.getElementById("progress-step");
     const detectedLanguage = document.getElementById("detected-language");
     const completeActions = document.getElementById("complete-actions");
     const downloadLink = document.getElementById("download-link");
     const previewLink = document.getElementById("preview-link");
-    let pollTimer = null;
+    const backgroundMessage = document.getElementById("background-processing-message");
+    const statusLink = document.getElementById("status-link");
 
-    function setError(message) {
-      errorBox.hidden = !message;
-      errorBox.textContent = message || "";
+    const progressElements = {
+      progressCard,
+      title: document.getElementById("progress-title"),
+      message: document.getElementById("progress-message"),
+      percent: document.getElementById("progress-percent"),
+      fill: progressFill,
+      progressbar: progressFill ? progressFill.parentElement : null,
+      step: document.getElementById("progress-step"),
+    };
+
+    let isUploading = false;
+    let isSubmitting = false;
+    let currentJobId = null;
+
+    function beforeUnloadHandler(event) {
+      if (!isUploading || currentJobId) return undefined;
+      const message = "Your document is still uploading. Leaving now may cancel the upload.";
+      event.preventDefault();
+      event.returnValue = message;
+      return message;
     }
 
-    function setProgress(data) {
-      const phase = normalizeStatus(data.current_phase || data.status || "queued");
-      const percent = progressFor(data);
-      progressCard.hidden = false;
-      if (normalizeStatus(data.status) !== "completed") {
-        completeActions.hidden = true;
-        downloadLink.hidden = true;
-        previewLink.hidden = true;
-      }
-      progressTitle.textContent = phaseLabels[phase] || data.current_step || "Processing";
-      progressMessage.textContent = data.phase_message || data.message || phaseLabels[phase] || "";
-      progressPercent.textContent = `${percent}%`;
-      progressFill.style.width = `${percent}%`;
-      progressStep.textContent = data.current_step || phaseLabels[phase] || "Processing";
-      progressFill.parentElement.setAttribute("aria-valuenow", String(percent));
-
-      if (data.detected_language) {
-        const confidence = data.detection_confidence != null
-          ? ` (${Math.round(Number(data.detection_confidence) * 100)}% confidence)`
-          : "";
-        detectedLanguage.textContent = `Detected source language: ${languageName(data.detected_language)}${confidence}`;
-        detectedLanguage.hidden = false;
-      }
+    function enableUploadLeaveWarning() {
+      window.addEventListener("beforeunload", beforeUnloadHandler);
     }
 
-    function clearPoll() {
-      if (pollTimer) {
-        window.clearTimeout(pollTimer);
-        pollTimer = null;
-      }
+    function disableUploadLeaveWarning() {
+      window.removeEventListener("beforeunload", beforeUnloadHandler);
     }
 
-    function poll(jobId, attempt) {
-      if (attempt > 160) {
-        setError("Translation is taking longer than expected. Refresh this page and check Recent Jobs.");
+    function resetOutputLinks() {
+      completeActions.hidden = true;
+      downloadLink.hidden = true;
+      previewLink.hidden = true;
+    }
+
+    function showBackgroundMessage(jobId) {
+      if (!backgroundMessage) return;
+      backgroundMessage.hidden = false;
+      if (statusLink) statusLink.href = `${form.dataset.previewBase}${jobId}/`;
+    }
+
+    function handleTerminal(data) {
+      const status = normalizeStatus(data.status);
+      if (status === "completed") {
+        button.disabled = true;
+        button.textContent = "Completed";
+        previewLink.hidden = !data.can_preview;
+        downloadLink.hidden = !data.can_download;
+        previewLink.href = `${form.dataset.previewBase}${data.job_id}/preview/`;
+        downloadLink.href = `${form.dataset.downloadBase}${data.job_id}/download/`;
+        completeActions.hidden = !(data.can_preview || data.can_download);
         return;
       }
-      fetch(`${form.dataset.statusBase}${jobId}/`, { credentials: "same-origin" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
-          return response.json();
-        })
-        .then((data) => {
-          setProgress(data);
-          const status = normalizeStatus(data.status);
-          if (status === "completed") {
-            clearPoll();
-            button.disabled = true;
-            button.textContent = "Completed";
-            previewLink.hidden = !data.can_preview;
-            downloadLink.hidden = !data.can_download;
-            previewLink.href = `${form.dataset.previewBase}${jobId}/preview/`;
-            downloadLink.href = `${form.dataset.downloadBase}${jobId}/download/`;
-            completeActions.hidden = !(data.can_preview || data.can_download);
-            return;
-          }
-          if (status === "failed") {
-            clearPoll();
-            button.disabled = false;
-            button.textContent = "Start Translation";
-            completeActions.hidden = true;
-            downloadLink.hidden = true;
-            previewLink.hidden = true;
-            setError(data.error || data.message || "Translation failed.");
-            return;
-          }
-          pollTimer = window.setTimeout(() => poll(jobId, attempt + 1), 1500);
-        })
-        .catch((error) => {
-          setError(error.message || "Could not reach the server.");
-          pollTimer = window.setTimeout(() => poll(jobId, attempt + 1), 2000);
-        });
+      if (status === "failed") {
+        button.disabled = false;
+        button.textContent = "Start Translation";
+        resetOutputLinks();
+        setError(errorBox, data.error || data.message || "Translation failed.");
+      }
     }
 
     function updateSelectedFile() {
       const file = fileInput.files && fileInput.files[0];
-      completeActions.hidden = true;
-      downloadLink.hidden = true;
-      previewLink.hidden = true;
-      detectedLanguage.hidden = true;
-      setError("");
+      resetOutputLinks();
+      setHidden(backgroundMessage, true);
+      setHidden(detectedLanguage, true);
+      setError(errorBox, "");
       if (!file) {
         fileName.textContent = "Drop your document here";
-        fileMeta.textContent = "PDF, DOCX, JPG, PNG, or TXT — up to 50 MB";
+        fileMeta.textContent = "PDF, DOCX, JPG, PNG, or TXT - up to 50 MB";
         readyMessage.hidden = true;
         button.disabled = true;
         return;
@@ -217,16 +365,18 @@
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const file = fileInput.files && fileInput.files[0];
-      if (!file) return;
-      clearPoll();
-      setError("");
-      completeActions.hidden = true;
-      downloadLink.hidden = true;
-      previewLink.hidden = true;
-      detectedLanguage.hidden = true;
+      if (!file || isSubmitting) return;
+      isSubmitting = true;
+      isUploading = true;
+      currentJobId = null;
+      enableUploadLeaveWarning();
+      setError(errorBox, "");
+      resetOutputLinks();
+      setHidden(backgroundMessage, true);
+      setHidden(detectedLanguage, true);
       button.disabled = true;
       button.textContent = "Uploading...";
-      setProgress({
+      updateProgressDom(progressElements, {
         status: "uploading",
         current_phase: "uploading",
         progress_percent: 3,
@@ -242,19 +392,129 @@
       })
         .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
         .then(({ ok, data }) => {
-          if (!ok) {
-            throw new Error(formatUploadError(data));
-          }
+          if (!ok) throw new Error(formatUploadError(data));
+          currentJobId = data.job_id;
+          isUploading = false;
+          disableUploadLeaveWarning();
           button.textContent = "Processing...";
-          setProgress(data);
-          poll(data.job_id, 0);
+          showBackgroundMessage(data.job_id);
+          updateProgressDom(progressElements, data);
+          updateLanguageDom(detectedLanguage, data);
+          PollingController.start(`upload:${data.job_id}`, `${form.dataset.statusBase}${data.job_id}/`, {
+            onUpdate: (payload) => {
+              updateProgressDom(progressElements, payload);
+              updateLanguageDom(detectedLanguage, payload);
+            },
+            onTerminal: handleTerminal,
+            onNetworkState: (message) => setError(errorBox, message),
+          });
         })
         .catch((error) => {
+          isUploading = false;
+          disableUploadLeaveWarning();
+          isSubmitting = false;
           button.disabled = false;
           button.textContent = "Start Translation";
-          setError(error.message || "Upload failed.");
+          setError(errorBox, error.message || "Upload failed.");
         });
     });
+  }
+
+  function initStatusPage() {
+    const root = document.querySelector("[data-status-poller]");
+    if (!root) return;
+
+    const progressFill = document.getElementById("status-monitor-fill");
+    const progressElements = {
+      progressCard: root,
+      title: document.getElementById("status-monitor-title"),
+      message: document.getElementById("status-monitor-message"),
+      percent: document.getElementById("status-monitor-percent"),
+      fill: progressFill,
+      progressbar: progressFill ? progressFill.parentElement : null,
+      step: document.getElementById("job-current-step"),
+    };
+    const network = document.getElementById("status-monitor-network");
+    const lastCheck = document.getElementById("status-monitor-last-check");
+    const phase = document.getElementById("status-monitor-phase");
+    const updated = document.getElementById("status-monitor-updated");
+    const phaseValue = document.getElementById("job-current-phase");
+    const messageValue = document.getElementById("job-phase-message");
+    const progressText = document.getElementById("job-progress-text");
+    const retryingState = document.getElementById("job-retrying-state");
+    const longMessage = document.getElementById("status-monitor-long");
+    const failedGuidance = document.getElementById("failed-guidance");
+    const statusPill = document.getElementById("job-status-pill");
+    const previewAction = document.getElementById("job-preview-action");
+    const downloadAction = document.getElementById("job-download-action");
+    const reloadButton = document.getElementById("reload-status-button");
+
+    function applyStatus(data) {
+      const status = normalizeStatus(data.status);
+      const percent = progressFor(data);
+      updateProgressDom(progressElements, data);
+      setText(phase, data.current_phase || status);
+      setText(updated, formatDateTime(data.updated_at));
+      setText(lastCheck, nowLabel());
+      setText(phaseValue, data.current_phase || status);
+      setText(messageValue, data.phase_message || data.message || "");
+      setText(progressText, `${percent}%`);
+      setText(retryingState, status === "retrying" ? "Yes" : "No");
+      setHidden(longMessage, !data.is_taking_longer);
+      if (statusPill) {
+        statusPill.textContent = statusLabel(status);
+        statusPill.className = `status-pill ${status === "queued" ? "pending" : status}`;
+      }
+      setHidden(previewAction, !data.can_preview);
+      setHidden(downloadAction, !data.can_download);
+      if (previewAction && data.can_preview && !previewAction.textContent.trim()) {
+        previewAction.textContent = "Preview Bilingual";
+      }
+      if (downloadAction && data.can_download && !downloadAction.textContent.trim()) {
+        downloadAction.textContent = "Download";
+      }
+      if (status === "failed") {
+        failedGuidance.hidden = false;
+        failedGuidance.textContent = `${data.error || data.message || "Translation failed."} Check the document quality or try uploading again. If this repeats, contact an administrator with this job ID.`;
+      }
+    }
+
+    function networkState(message) {
+      if (!network) return;
+      network.hidden = !message;
+      network.textContent = message || "";
+    }
+
+    let controller = null;
+    const handlers = {
+      onUpdate: applyStatus,
+      onTerminal: (data) => {
+        applyStatus(data);
+        controller = null;
+      },
+      onNetworkState: networkState,
+    };
+    const initialStatus = normalizeStatus(root.dataset.initialStatus);
+    if (activeStatuses.has(initialStatus)) {
+      controller = PollingController.start(`detail:${root.dataset.jobId}`, root.dataset.statusUrl, handlers);
+    }
+
+    if (reloadButton) {
+      reloadButton.addEventListener("click", () => {
+        networkState("");
+        if (controller) {
+          controller.poll();
+          return;
+        }
+        fetch(root.dataset.statusUrl, { credentials: "same-origin" })
+          .then((response) => {
+            if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
+            return response.json();
+          })
+          .then(applyStatus)
+          .catch((error) => networkState(`${error.message || "Could not reach the server."} Retrying status check...`));
+      });
+    }
   }
 
   function formatUploadError(data) {
@@ -269,9 +529,6 @@
     return data.error || "Upload failed.";
   }
 
-  /* =========================================================
-     Bilingual preview page
-  ========================================================= */
   function initPreview() {
     const root = document.getElementById("preview-app");
     if (!root) return;
@@ -422,9 +679,6 @@
       .catch((error) => showError(error.message || "Could not load preview."));
   }
 
-  /* =========================================================
-     Mobile navigation
-  ========================================================= */
   function initMobileNav() {
     const hamburger = document.getElementById("nav-hamburger");
     const navLinks = document.getElementById("nav-links");
@@ -450,9 +704,6 @@
     });
   }
 
-  /* =========================================================
-     Dismissible flash messages
-  ========================================================= */
   function initMessageDismiss() {
     document.querySelectorAll(".message-dismiss").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -467,11 +718,9 @@
     });
   }
 
-  /* =========================================================
-     Boot
-  ========================================================= */
   document.addEventListener("DOMContentLoaded", () => {
     initUpload();
+    initStatusPage();
     initPreview();
     initMobileNav();
     initMessageDismiss();

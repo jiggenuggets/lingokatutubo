@@ -38,6 +38,7 @@ class OCRService:
         denoise: bool = True,
         detect_orientation: bool = True,
         threshold: bool = True,
+        timeout_seconds: Optional[int] = None,
     ):
         # DPI 300 is the Tesseract-recommended minimum for reliable OCR.
         # 200 DPI was used previously; raising to 300 improves recognition
@@ -48,6 +49,7 @@ class OCRService:
         self.denoise_enabled = denoise
         self.threshold_enabled = threshold
         self.detect_orientation_enabled = detect_orientation
+        self.timeout_seconds = timeout_seconds or self._default_timeout_seconds()
         self._verified: Optional[bool] = None
         self._installed_languages: Optional[List[str]] = None
         # OSD support is checked lazily and cached. None = unknown, False = OSD
@@ -62,6 +64,15 @@ class OCRService:
                 pytesseract.pytesseract.tesseract_cmd = tess_cmd
             except Exception:
                 pass
+
+    @staticmethod
+    def _default_timeout_seconds() -> int:
+        try:
+            from django.conf import settings
+
+            return int(getattr(settings, "LINGOKATUTUBO_OCR_TIMEOUT_SECONDS", 120))
+        except Exception:
+            return int(os.environ.get("LINGOKATUTUBO_OCR_TIMEOUT_SECONDS", "120"))
 
     # ------------------------------------------------------------------
     # Availability
@@ -330,7 +341,11 @@ class OCRService:
             return 0
         try:
             import pytesseract
-            osd = pytesseract.image_to_osd(img, config="--psm 0")
+            osd = pytesseract.image_to_osd(
+                img,
+                config="--psm 0",
+                timeout=self.timeout_seconds,
+            )
             self._osd_available = True
             for line in osd.splitlines():
                 if line.startswith("Rotate:"):
@@ -424,7 +439,10 @@ class OCRService:
 
         try:
             data = pytesseract.image_to_data(
-                img, output_type=Output.DICT, lang=lang
+                img,
+                output_type=Output.DICT,
+                lang=lang,
+                timeout=self.timeout_seconds,
             )
         except Exception as e:
             if lang != "eng":
@@ -434,7 +452,10 @@ class OCRService:
                 )
                 try:
                     data = pytesseract.image_to_data(
-                        img, output_type=Output.DICT, lang="eng"
+                        img,
+                        output_type=Output.DICT,
+                        lang="eng",
+                        timeout=self.timeout_seconds,
                     )
                 except Exception as retry_e:
                     print(f"[OCR] page {page_idx + 1} failed: {retry_e}")

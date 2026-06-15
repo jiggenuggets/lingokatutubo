@@ -1,4 +1,5 @@
 try:
+    from django.conf import settings
     from celery import shared_task
 except ImportError:  # pragma: no cover - Celery is optional until deployment wiring.
     shared_task = None
@@ -27,8 +28,18 @@ def _run_job(
 
 if shared_task:
 
-    @shared_task(name="translator.process_translation_job")
+    @shared_task(
+        name="translator.process_translation_job",
+        bind=True,
+        acks_late=True,
+        time_limit=getattr(settings, "LINGOKATUTUBO_TASK_TIMEOUT_SECONDS", 900),
+        soft_time_limit=max(
+            1,
+            getattr(settings, "LINGOKATUTUBO_TASK_TIMEOUT_SECONDS", 900) - 30,
+        ),
+    )
     def process_translation_job(
+        self,
         job_id,
         input_file_path,
         file_type_value,

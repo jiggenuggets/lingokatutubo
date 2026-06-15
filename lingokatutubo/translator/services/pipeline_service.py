@@ -113,10 +113,7 @@ class PipelineService:
         callback = getattr(self, "job_update_callback", None)
         if not callback:
             return
-        try:
-            callback(job)
-        except Exception as exc:
-            print(f"[Pipeline] Job persistence callback failed: {exc}")
+        callback(job)
 
     @staticmethod
     def _run_ocr_for_scanned(input_file_path: str) -> dict:
@@ -164,11 +161,11 @@ class PipelineService:
         """
         job = JobStatus(job_id)
         job.file_type = file_type
+        job.status = "processing"
         self.jobs[job_id] = job
         self._persist_job(job)
         
         try:
-            job.status = "processing"
             self._set_job_phase(job, "detecting")
 
             print(f"[Pipeline] Job {job_id} started")
@@ -473,8 +470,10 @@ class PipelineService:
             job.status = "failed"
             job.error = str(e)
             job.phase_message = str(e)
+            job.current_phase = "failed"
             job.current_step = "Translation failed"
             job.metadata["phase_message"] = job.phase_message
+            job.metadata["current_phase"] = job.current_phase
             job.metadata["current_step"] = job.current_step
             job.metadata["progress_percent"] = job.progress
             self._persist_job(job)
@@ -1233,7 +1232,7 @@ class PipelineService:
         return [
             job_id
             for job_id, job in self.jobs.items()
-            if job.status in {"queued", "processing"}
+            if job.status in {"queued", "retrying", "processing"}
         ]
 
     def cleanup_job_files(self, job_id: str) -> bool:

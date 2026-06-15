@@ -29,7 +29,15 @@
       {% endif %}
     </div>
 
-    <section class="translation-details job-info-panel">
+    <section
+      class="translation-details job-info-panel"
+      data-status-poller
+      data-job-id="{{ job.job_id }}"
+      data-initial-status="{{ job.status }}"
+      data-status-url="{{ status_api_url }}"
+      data-preview-url="{% url 'translator:job_preview' job.id %}"
+      data-download-url="{% url 'translator:job_download' job.id %}"
+    >
       <h2 class="section-heading">Job Information</h2>
 
       <ol class="status-timeline" aria-label="Translation progress">
@@ -41,15 +49,50 @@
         {% endfor %}
       </ol>
 
+      <section class="status-monitor" aria-label="Live processing status">
+        <div class="status-monitor-top">
+          <div>
+            <strong id="status-monitor-title">{{ status_label }}</strong>
+            <p id="status-monitor-message">{{ job.phase_message|default:"No message available." }}</p>
+          </div>
+          <span id="status-monitor-percent" class="progress-pct">{{ progress_percent }}%</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ progress_percent }}">
+          <div id="status-monitor-fill" style="width:{{ progress_percent }}%"></div>
+        </div>
+        <div class="status-monitor-meta">
+          <span>Phase: <strong id="status-monitor-phase">{{ job.current_phase|default:"queued" }}</strong></span>
+          <span>Last update: <strong id="status-monitor-updated">{{ job.updated_at|date:"M j, Y H:i:s" }}</strong></span>
+          <span>Last successful check: <strong id="status-monitor-last-check">Just now</strong></span>
+        </div>
+        <p id="status-monitor-network" class="status-network" hidden></p>
+        {% if is_taking_longer %}
+          <p id="status-monitor-long" class="alert warning" role="status">This is taking longer than usual. Processing may still finish in the background.</p>
+        {% else %}
+          <p id="status-monitor-long" class="alert warning" role="status" hidden>This is taking longer than usual. Processing may still finish in the background.</p>
+        {% endif %}
+        <button id="reload-status-button" class="button secondary" type="button">Reload Status</button>
+      </section>
+
       <dl class="job-meta-list">
         <div class="job-meta-row">
           <dt>Status</dt>
-          <dd><span class="status-pill {{ status_class }}" role="status">{{ status_label }}</span></dd>
+          <dd><span id="job-status-pill" class="status-pill {{ status_class }}" role="status">{{ status_label }}</span></dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Progress</dt>
+          <dd><span id="job-progress-text">{{ progress_percent }}%</span></dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Current Phase</dt>
+          <dd><span id="job-current-phase">{{ job.current_phase|default:"queued" }}</span></dd>
         </div>
 
         <div class="job-meta-row">
           <dt>Current Step</dt>
-          <dd>
+          <dd id="job-current-step">
             {% if has_failed %}
               <span class="text-danger">Failed during processing</span>
             {% elif job.current_step %}
@@ -62,7 +105,7 @@
 
         <div class="job-meta-row">
           <dt>Message</dt>
-          <dd>
+          <dd id="job-phase-message">
             {% if has_failed %}
               Translation failed safely.
             {% elif job.phase_message %}
@@ -74,8 +117,18 @@
         </div>
 
         <div class="job-meta-row">
-          <dt>Uploaded</dt>
+          <dt>Started</dt>
           <dd>{{ uploaded_at|date:"M j, Y H:i" }}</dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Elapsed</dt>
+          <dd>{{ job.created_at|timesince }}</dd>
+        </div>
+
+        <div class="job-meta-row">
+          <dt>Retrying</dt>
+          <dd id="job-retrying-state">{% if is_retrying %}Yes{% else %}No{% endif %}</dd>
         </div>
 
         <div class="job-meta-row">
@@ -176,10 +229,12 @@
       {% endif %}
 
       {% if has_failed and failure_message %}
-        <div class="alert error" role="alert">
+        <div id="failed-guidance" class="alert error" role="alert">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <span>{{ failure_message }}</span>
+          <span>{{ failure_message }} Check the document quality or try uploading again. If this repeats, contact an administrator with this job ID.</span>
         </div>
+      {% else %}
+        <div id="failed-guidance" class="alert error" role="alert" hidden></div>
       {% endif %}
 
       {% if is_processing %}
@@ -194,11 +249,15 @@
           <a class="button secondary" href="{% url 'translator:history' %}">← History</a>
 
           {% if can_preview %}
-            <a class="button primary" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+            <a id="job-preview-action" class="button primary" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+          {% else %}
+            <a id="job-preview-action" class="button primary" href="{% url 'translator:job_preview' job.id %}" hidden></a>
           {% endif %}
 
           {% if can_download %}
-            <a class="button secondary" href="{% url 'translator:job_download' job.id %}">Download</a>
+            <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}">Download</a>
+          {% else %}
+            <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}" hidden></a>
           {% endif %}
 
           {% if can_retry %}

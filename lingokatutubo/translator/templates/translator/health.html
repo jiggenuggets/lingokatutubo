@@ -1,0 +1,52 @@
+{% extends "translator/base.html" %}
+
+{% block title %}System Health{% endblock %}
+{% block meta_description %}Staff-only LingoKatutubo processing health checks.{% endblock %}
+
+{% block content %}
+<main class="translator-page">
+  <header class="page-heading compact">
+    <h1>System Health</h1>
+    <p class="page-subtitle">Staff-only background processing and OCR readiness.</p>
+  </header>
+
+  <section class="health-layout">
+    <section class="health-panel">
+      <h2 class="section-heading">Services</h2>
+      <div class="health-check-list">
+        {% for check in checks %}
+          <article class="health-check {{ check.status }}">
+            <div>
+              <strong>{{ check.name }}</strong>
+              <p>{{ check.detail }}</p>
+            </div>
+            <span class="status-pill {{ check.status }}">{{ check.status }}</span>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="health-panel">
+      <h2 class="section-heading">Jobs</h2>
+      <dl class="health-count-grid">
+        <div>
+          <dt>Queued</dt>
+          <dd>{{ job_counts.queued }}</dd>
+        </div>
+        <div>
+          <dt>Processing</dt>
+          <dd>{{ job_counts.processing }}</dd>
+        </div>
+        <div>
+          <dt>Retrying</dt>
+          <dd>{{ job_counts.retrying }}</dd>
+        </div>
+        <div>
+          <dt>Stale</dt>
+          <dd>{{ job_counts.stale }}</dd>
+        </div>
+      </dl>
+    </section>
+  </section>
+</main>
+{% endblock %}

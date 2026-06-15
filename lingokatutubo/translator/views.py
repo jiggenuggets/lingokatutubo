@@ -3,14 +3,19 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
+from django.contrib.admin.views.decorators import staff_member_required
+from django.db import connection
 from django.db.models import Avg, Count, Prefetch, Q
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods, require_POST
 
 from .forms import DocumentUploadForm, SignUpForm
@@ -83,7 +88,11 @@ def translate(request):
             card
             for card in recent_jobs
             if card["job"].status
-            in {TranslationJob.Status.QUEUED, TranslationJob.Status.PROCESSING}
+            in {
+                TranslationJob.Status.QUEUED,
+                TranslationJob.Status.RETRYING,
+                TranslationJob.Status.PROCESSING,
+            }
         ),
         None,
     )
@@ -259,7 +268,11 @@ def api_translate(request):
     # 1. Active jobs limit check (Maximum 2 queued/processing jobs per user)
     active_jobs = TranslationJob.objects.filter(
         owner=request.user,
-        status__in=[TranslationJob.Status.QUEUED, TranslationJob.Status.PROCESSING],
+        status__in=[
+            TranslationJob.Status.QUEUED,
+            TranslationJob.Status.RETRYING,
+            TranslationJob.Status.PROCESSING,
+        ],
         is_deleted=False
     ).count()
     if active_jobs >= 2:
@@ -529,13 +542,15 @@ def quick_translate(request):
         return JsonResponse({"error": str(exc)}, status=400)
 
 
+@staff_member_required(login_url="translator:login")
 def health(request):
-    return JsonResponse(
+    return render(
+        request,
+        "translator/health.html",
         {
-            "status": "ok",
-            "translation_dataset_loaded": translation_dataset_loaded(),
-            "database": "configured",
-        }
+            "checks": _health_checks(),
+            "job_counts": _health_job_counts(),
+        },
     )
 
 
@@ -591,6 +606,179 @@ def delete_job(request, job_id):
     return redirect("translator:history")
 
 
+def _health_checks() -> list:
+    dataset_loaded = translation_dataset_loaded()
+    return [
+        _database_health(),
+        _task_mode_health(),
+        _redis_health(),
+        _celery_worker_health(),
+        _tesseract_health(),
+        _ocr_languages_health(),
+        _media_writability_health(),
+        {
+            "name": "Translation dataset",
+            "status": "ok" if dataset_loaded else "warning",
+            "detail": "Loaded" if dataset_loaded else "Not loaded",
+        },
+    ]
+
+
+def _database_health() -> dict:
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        return {"name": "Database", "status": "ok", "detail": connection.vendor}
+    except Exception as exc:
+        return {"name": "Database", "status": "error", "detail": str(exc)}
+
+
+def _task_mode_health() -> dict:
+    task_mode = getattr(settings, "LINGOKATUTUBO_TASK_MODE", "thread")
+    status = "ok" if str(task_mode).lower() == "celery" else "warning"
+    detail = (
+        "Celery background worker mode"
+        if status == "ok"
+        else "Development runner; use Celery for durable background processing"
+    )
+    return {"name": "Task mode", "status": status, "detail": f"{task_mode} - {detail}"}
+
+
+def _redis_health() -> dict:
+    broker_url = getattr(settings, "CELERY_BROKER_URL", "")
+    safe_broker = _safe_service_url(broker_url)
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            broker_url,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        client.ping()
+        return {"name": "Redis / broker", "status": "ok", "detail": safe_broker}
+    except Exception as exc:
+        return {
+            "name": "Redis / broker",
+            "status": "error",
+            "detail": f"{safe_broker} unavailable: {exc}",
+        }
+
+
+def _celery_worker_health() -> dict:
+    try:
+        from lingokatutubo_django.celery import app as celery_app
+
+        replies = celery_app.control.ping(timeout=1)
+        if replies:
+            return {
+                "name": "Celery worker",
+                "status": "ok",
+                "detail": f"{len(replies)} worker(s) responded",
+            }
+        return {
+            "name": "Celery worker",
+            "status": "warning",
+            "detail": "No workers responded",
+        }
+    except Exception as exc:
+        return {"name": "Celery worker", "status": "error", "detail": str(exc)}
+
+
+def _tesseract_health() -> dict:
+    try:
+        from translator.services.ocr_stage import get_ocr_service
+
+        service = get_ocr_service()
+        if service.is_available():
+            return {"name": "Tesseract", "status": "ok", "detail": "Available"}
+        return {"name": "Tesseract", "status": "error", "detail": "Unavailable"}
+    except Exception as exc:
+        return {"name": "Tesseract", "status": "error", "detail": str(exc)}
+
+
+def _ocr_languages_health() -> dict:
+    try:
+        from translator.services.ocr_stage import get_ocr_service
+
+        languages = get_ocr_service().get_installed_languages()
+        detail = ", ".join(languages) if languages else "No languages reported"
+        return {
+            "name": "Installed OCR languages",
+            "status": "ok" if languages else "warning",
+            "detail": detail,
+        }
+    except Exception as exc:
+        return {
+            "name": "Installed OCR languages",
+            "status": "error",
+            "detail": str(exc),
+        }
+
+
+def _media_writability_health() -> dict:
+    media_root = Path(settings.MEDIA_ROOT)
+    probe_dir = media_root / "jobs" / ".health"
+    probe_file = probe_dir / "write-check.tmp"
+    try:
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        return {
+            "name": "Media/job directory",
+            "status": "ok",
+            "detail": f"Writable: {media_root}",
+        }
+    except Exception as exc:
+        return {
+            "name": "Media/job directory",
+            "status": "error",
+            "detail": f"Not writable: {exc}",
+        }
+
+
+def _health_job_counts() -> dict:
+    cutoff = timezone.now() - timezone.timedelta(minutes=15)
+    active_filter = Q(is_deleted=False)
+    return {
+        "queued": TranslationJob.objects.filter(
+            active_filter,
+            status=TranslationJob.Status.QUEUED,
+        ).count(),
+        "processing": TranslationJob.objects.filter(
+            active_filter,
+            status=TranslationJob.Status.PROCESSING,
+        ).count(),
+        "retrying": TranslationJob.objects.filter(
+            active_filter,
+            status=TranslationJob.Status.RETRYING,
+        ).count(),
+        "stale": TranslationJob.objects.filter(
+            active_filter,
+            status__in=[
+                TranslationJob.Status.QUEUED,
+                TranslationJob.Status.PROCESSING,
+                TranslationJob.Status.RETRYING,
+            ],
+            updated_at__lte=cutoff,
+        ).count(),
+    }
+
+
+def _safe_service_url(raw_url: str) -> str:
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return "configured"
+    if not parsed.scheme:
+        return "configured"
+    host = parsed.hostname or "localhost"
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path or ""
+    return f"{parsed.scheme}://{host}{port}{path}"
+
+
 def _get_owned_job(request, job_id) -> TranslationJob:
     return get_object_or_404(_owned_jobs_queryset(request), id=job_id)
 
@@ -634,14 +822,18 @@ def _job_payload(job: TranslationJob) -> dict:
         "has_failed": state["has_failed"],
         **translation_quality,
         "created_at": job.created_at.isoformat(),
+        "started_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "is_retrying": job.status == TranslationJob.Status.RETRYING,
+        "is_taking_longer": _job_is_taking_longer(job),
     }
 
 
 def _status_message(status: str) -> str:
     return {
         TranslationJob.Status.QUEUED: "Job queued",
+        TranslationJob.Status.RETRYING: "Job is being retried",
         TranslationJob.Status.PROCESSING: "Translation in progress",
         TranslationJob.Status.COMPLETED: "Translation complete",
         TranslationJob.Status.FAILED: "Translation failed",
@@ -685,6 +877,7 @@ def _resolve_job_file(job: TranslationJob, path: str):
 def _job_state_context(job: TranslationJob) -> dict:
     is_processing = job.status in {
         TranslationJob.Status.QUEUED,
+        TranslationJob.Status.RETRYING,
         TranslationJob.Status.PROCESSING,
     }
 
@@ -760,6 +953,12 @@ def _job_card_context(job: TranslationJob) -> dict:
             "status_label": _status_label(job.status),
             "status_class": _status_class(job.status),
             "failure_message": _failure_message(job),
+            "progress_percent": 100
+            if job.status == TranslationJob.Status.COMPLETED
+            else job.progress,
+            "is_retrying": job.status == TranslationJob.Status.RETRYING,
+            "is_taking_longer": _job_is_taking_longer(job),
+            "status_api_url": reverse("translator:status", args=[job.id]),
         }
     )
 
@@ -824,7 +1023,11 @@ def _workflow_steps(job: TranslationJob) -> list:
     elif job.status == TranslationJob.Status.COMPLETED:
         completed_index = len(steps) - 1
         active_index = None
-    elif job.status in {TranslationJob.Status.QUEUED, TranslationJob.Status.PROCESSING}:
+    elif job.status in {
+        TranslationJob.Status.QUEUED,
+        TranslationJob.Status.RETRYING,
+        TranslationJob.Status.PROCESSING,
+    }:
         active_index = _workflow_phase_index(job.current_phase)
         completed_index = max(0, active_index - 1)
     else:
@@ -852,6 +1055,7 @@ def _workflow_phase_index(phase: str) -> int:
     phase = str(phase or "").lower()
     phase_map = {
         "queued": 0,
+        "retrying": 0,
         "uploading": 0,
         "detecting": 1,
         "extracting": 1,
@@ -861,8 +1065,24 @@ def _workflow_phase_index(phase: str) -> int:
         "preview_generation": 3,
         "bilingual_output": 3,
         "completed": 4,
+        "failed": 4,
     }
     return phase_map.get(phase, 1)
+
+
+def _job_is_taking_longer(job: TranslationJob) -> bool:
+    if job.status not in {
+        TranslationJob.Status.QUEUED,
+        TranslationJob.Status.PROCESSING,
+        TranslationJob.Status.RETRYING,
+    }:
+        return False
+    threshold_minutes = int(
+        getattr(settings, "LINGOKATUTUBO_LONG_JOB_MINUTES", 10)
+    )
+    return job.created_at <= timezone.now() - timezone.timedelta(
+        minutes=threshold_minutes
+    )
 
 
 def _uploaded_document_for(job: TranslationJob):
@@ -970,6 +1190,7 @@ def _extraction_method_label(method: str) -> str:
 def _status_label(status: str) -> str:
     return {
         TranslationJob.Status.QUEUED: 'Pending',
+        TranslationJob.Status.RETRYING: 'Retrying',
         TranslationJob.Status.PROCESSING: 'Processing',
         TranslationJob.Status.COMPLETED: 'Completed',
         TranslationJob.Status.FAILED: 'Failed',
@@ -979,6 +1200,8 @@ def _status_label(status: str) -> str:
 def _status_class(status: str) -> str:
     if status == TranslationJob.Status.QUEUED:
         return 'pending'
+    if status == TranslationJob.Status.RETRYING:
+        return 'retrying'
     return str(status or 'unknown')
 
 
