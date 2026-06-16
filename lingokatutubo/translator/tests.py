@@ -510,7 +510,8 @@ class TranslatorAuthAndJobTests(TestCase):
         body = response.content.decode("utf-8")
         self.assertNotIn("Preview Bilingual", body)
         self.assertNotIn("Download</a>", body)
-        self.assertIn("Translation failed safely", body)
+        # Error message from job.error appears in the alert panel
+        self.assertIn("OCR produced no text.", body)
         self.assertIn("Failed", body)
 
     def test_preview_before_completion_redirects_to_job_detail(self):
@@ -1371,3 +1372,975 @@ class TranslatorPhase4SystemTests(TestCase):
         job.save()
         call_command("purge_deleted_job_files", days=30)
         self.assertFalse(os.path.exists(tmp_name))
+
+
+# ============================================================
+# File Upload Validation Tests
+# ============================================================
+
+
+class TranslatorUploadValidationTests(TestCase):
+    """Tests for file-type and signature validation on upload."""
+
+    password = "Bagobo-Upload-Test-2026!"
+
+    def setUp(self):
+        from django.core.cache import cache as _cache
+        _cache.clear()
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.user = User.objects.create_user(
+            username="uploadtest",
+            email="uploadtest@example.test",
+            password=self.password,
+        )
+
+    @staticmethod
+    def _make_minimal_docx() -> bytes:
+        import io
+        import zipfile as _zipfile
+        buf = io.BytesIO()
+        with _zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                "</Types>",
+            )
+            zf.writestr("word/document.xml", "<w:document/>")
+        return buf.getvalue()
+
+    @staticmethod
+    def _make_minimal_jpg() -> bytes:
+        from PIL import Image
+        import io
+        img = Image.new("RGB", (4, 4), color=(200, 200, 200))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _make_minimal_png() -> bytes:
+        from PIL import Image
+        import io
+        img = Image.new("RGB", (4, 4), color=(200, 200, 200))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _upload(self, filename, content, content_type, patch_start=True):
+        self.client.force_login(self.user)
+        uploaded = SimpleUploadedFile(filename, content, content_type=content_type)
+        if patch_start:
+            with patch("translator.views.start_translation_job"):
+                return self.client.post(
+                    reverse("translator:upload"),
+                    {"file": uploaded, "source_language": "auto", "target_language": "tagabawa"},
+                )
+        return self.client.post(
+            reverse("translator:upload"),
+            {"file": uploaded, "source_language": "auto", "target_language": "tagabawa"},
+        )
+
+    def test_upload_valid_pdf_accepted(self):
+        response = self._upload(
+            "doc.pdf",
+            b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF",
+            "application/pdf",
+        )
+        self.assertEqual(response.status_code, 202)
+
+    def test_upload_valid_docx_accepted(self):
+        response = self._upload(
+            "doc.docx",
+            self._make_minimal_docx(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertEqual(response.status_code, 202)
+
+    def test_upload_valid_jpg_accepted(self):
+        response = self._upload("photo.jpg", self._make_minimal_jpg(), "image/jpeg")
+        self.assertEqual(response.status_code, 202)
+
+    def test_upload_valid_png_accepted(self):
+        response = self._upload("image.png", self._make_minimal_png(), "image/png")
+        self.assertEqual(response.status_code, 202)
+
+    def test_upload_valid_txt_accepted(self):
+        response = self._upload(
+            "notes.txt",
+            "Hello world, kumusta?".encode("utf-8"),
+            "text/plain",
+        )
+        self.assertEqual(response.status_code, 202)
+
+    def test_upload_invalid_pdf_signature_rejected(self):
+        """File with .pdf extension but wrong magic bytes is rejected."""
+        response = self._upload(
+            "fake.pdf",
+            b"Not a real PDF document",
+            "application/pdf",
+            patch_start=False,
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_corrupted_docx_rejected(self):
+        """File with .docx extension but invalid ZIP content is rejected."""
+        response = self._upload(
+            "broken.docx",
+            b"PK\x03\x04this is not a real zip archive",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            patch_start=False,
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_non_utf8_txt_rejected(self):
+        """TXT file with non-UTF-8 bytes is rejected."""
+        response = self._upload(
+            "latin.txt",
+            b"\xff\xfe\x00invalid latin-1 content",
+            "text/plain",
+            patch_start=False,
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_disallowed_extension_rejected(self):
+        """File with a disallowed extension (e.g. .exe) is always rejected."""
+        response = self._upload(
+            "program.exe",
+            b"binary content",
+            "application/octet-stream",
+            patch_start=False,
+        )
+        self.assertEqual(response.status_code, 400)
+
+
+# ============================================================
+# Preview Pagination Tests
+# ============================================================
+
+
+class TranslatorPreviewPaginationTests(TestCase):
+    """Verify that the bilingual preview paginates segments correctly."""
+
+    password = "Bagobo-Paginate-2026!"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="pagalice",
+            email="pagalice@example.test",
+            password=self.password,
+        )
+
+    def _create_completed_job(self):
+        return TranslationJob.objects.create(
+            owner=self.alice,
+            original_filename="long_doc.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            status=TranslationJob.Status.COMPLETED,
+        )
+
+    def _bulk_create_segments(self, job, count):
+        TranslationSegment.objects.bulk_create([
+            TranslationSegment(
+                job=job,
+                segment_index=i + 1,
+                source_text=f"Source segment {i + 1}",
+                translated_text=f"Translated segment {i + 1}",
+                source_language="english",
+                target_language="tagabawa",
+                method="exact_phrase",
+                confidence=0.9,
+            )
+            for i in range(count)
+        ])
+
+    def test_preview_first_page_shows_first_25_segments(self):
+        job = self._create_completed_job()
+        self._bulk_create_segments(job, 30)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("Source segment 1", body)
+        self.assertIn("Source segment 25", body)
+        self.assertNotIn("Source segment 26", body)
+        self.assertIn("Page 1 of 2", body)
+
+    def test_preview_second_page_shows_remaining_segments(self):
+        job = self._create_completed_job()
+        self._bulk_create_segments(job, 30)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(
+            reverse("translator:job_preview", args=[job.id]) + "?page=2"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertNotIn("Source segment 25", body)
+        self.assertIn("Source segment 26", body)
+        self.assertIn("Source segment 30", body)
+        self.assertIn("Page 2 of 2", body)
+
+    def test_preview_total_segment_count_shown_correctly(self):
+        job = self._create_completed_job()
+        self._bulk_create_segments(job, 30)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        # Total segments badge should show 30, not just the current page count (25)
+        self.assertIn("30 segments", body)
+
+    def test_preview_no_pagination_for_small_document(self):
+        job = self._create_completed_job()
+        self._bulk_create_segments(job, 10)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        # No pagination nav when all segments fit on one page
+        self.assertNotIn("Page 1 of", body)
+
+    def test_preview_owner_isolation_with_pagination(self):
+        bob = User.objects.create_user(
+            username="pagbob",
+            email="pagbob@example.test",
+            password=self.password,
+        )
+        job = self._create_completed_job()
+        self._bulk_create_segments(job, 5)
+        self.client.force_login(bob)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 404)
+
+
+# ============================================================
+# Admin Access and Read-Only Tests
+# ============================================================
+
+
+class TranslatorAdminTests(TestCase):
+    """Verify admin interface access controls and read-only log enforcement."""
+
+    password = "Bagobo-Admin-2026!"
+
+    def setUp(self):
+        self.regular = User.objects.create_user(
+            username="regular_admin_test",
+            email="regular@example.test",
+            password=self.password,
+        )
+        self.staff = User.objects.create_user(
+            username="staff_admin_test",
+            email="staff@example.test",
+            password=self.password,
+            is_staff=True,
+            is_superuser=True,
+        )
+
+    def test_admin_access_denied_for_anonymous(self):
+        response = self.client.get("/admin/")
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_admin_access_denied_for_regular_user(self):
+        self.client.force_login(self.regular)
+        response = self.client.get("/admin/")
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_admin_accessible_for_superuser(self):
+        self.client.force_login(self.staff)
+        response = self.client.get("/admin/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_admin_translation_job_list_visible_to_superuser(self):
+        self.client.force_login(self.staff)
+        response = self.client.get("/admin/translator/translationjob/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_admin_shows_soft_deleted_jobs(self):
+        job = TranslationJob.objects.create(
+            owner=self.regular,
+            original_filename="deleted_doc.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            status=TranslationJob.Status.COMPLETED,
+            is_deleted=True,
+        )
+        self.client.force_login(self.staff)
+        response = self.client.get("/admin/translator/translationjob/?is_deleted__exact=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("deleted_doc.pdf", response.content.decode("utf-8"))
+
+    def test_system_event_log_has_no_add_permission(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from translator.admin import SystemEventLogAdmin
+        from translator.models import SystemEventLog
+
+        admin_instance = SystemEventLogAdmin(SystemEventLog, AdminSite())
+        request = RequestFactory().get("/admin/")
+        request.user = self.staff
+        self.assertFalse(admin_instance.has_add_permission(request))
+
+    def test_system_event_log_has_no_change_permission(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from translator.admin import SystemEventLogAdmin
+        from translator.models import SystemEventLog
+
+        admin_instance = SystemEventLogAdmin(SystemEventLog, AdminSite())
+        request = RequestFactory().get("/admin/")
+        request.user = self.staff
+        self.assertFalse(admin_instance.has_change_permission(request))
+
+    def test_system_event_log_has_no_delete_permission(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from translator.admin import SystemEventLogAdmin
+        from translator.models import SystemEventLog
+
+        admin_instance = SystemEventLogAdmin(SystemEventLog, AdminSite())
+        request = RequestFactory().get("/admin/")
+        request.user = self.staff
+        self.assertFalse(admin_instance.has_delete_permission(request))
+
+    def test_user_activity_log_is_fully_read_only(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from translator.admin import UserActivityLogAdmin
+        from translator.models import UserActivityLog
+
+        admin_instance = UserActivityLogAdmin(UserActivityLog, AdminSite())
+        request = RequestFactory().get("/admin/")
+        request.user = self.staff
+        self.assertFalse(admin_instance.has_add_permission(request))
+        self.assertFalse(admin_instance.has_change_permission(request))
+        self.assertFalse(admin_instance.has_delete_permission(request))
+
+
+# ============================================================
+# UI Cleanliness Tests
+# ============================================================
+
+
+class TranslatorUICleanlinessTests(TestCase):
+    """Verify that duplicate UI elements have been removed."""
+
+    password = "Bagobo-UI-2026!"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="uialice",
+            email="uialice@example.test",
+            password=self.password,
+        )
+
+    def _create_job(self, status=TranslationJob.Status.PROCESSING):
+        return TranslationJob.objects.create(
+            owner=self.alice,
+            original_filename="ui_test.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            status=status,
+        )
+
+    def test_job_detail_has_no_separate_status_dl_row(self):
+        """Status is shown only in the heading pill, not repeated in a dl row."""
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        # The dl must not contain a "Status" row label
+        self.assertNotIn("<dt>Status</dt>", body)
+
+    def test_job_detail_has_no_separate_progress_dl_row(self):
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn("<dt>Progress</dt>", body)
+
+    def test_job_detail_has_no_separate_phase_dl_row(self):
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn("<dt>Current Phase</dt>", body)
+
+    def test_job_detail_has_no_separate_message_dl_row(self):
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn("<dt>Message</dt>", body)
+
+    def test_active_job_banner_hidden_on_its_own_detail_page(self):
+        """Global banner is suppressed when the user is already viewing that job."""
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn("active-job-banner", body)
+
+    def test_active_job_banner_shows_on_history_page(self):
+        """Global banner IS shown when on history page while a job is active."""
+        self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:history"))
+        body = response.content.decode("utf-8")
+        self.assertIn("active-job-banner", body)
+
+    def test_preview_page_has_no_duplicate_download_button(self):
+        """Download button appears at most once on the preview page."""
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        output_path = self.media_root / "jobs" / job.job_id / "translated.pdf"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4\n%%EOF")
+        job.output_file_path = str(output_path)
+        job.save(update_fields=["output_file_path"])
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertEqual(body.count("Download Translated PDF"), 1)
+
+    def test_ocr_confidence_row_absent_for_non_ocr_job(self):
+        """OCR Confidence row does not appear for digital PDF jobs."""
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        job.metadata = {"extraction_method": "direct_pdf_text"}
+        job.save(update_fields=["metadata"])
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn("N/A (not an OCR document)", body)
+
+    def test_ocr_low_confidence_warning_badge_shown(self):
+        """⚠ Low badge appears when OCR confidence is below threshold."""
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        job.metadata = {
+            "extraction_method": "ocr_image",
+            "ocr_summary": {
+                "mean_confidence": 0.45,
+                "has_low_quality_warning": True,
+            },
+        }
+        job.save(update_fields=["metadata"])
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertIn("45%", body)
+        self.assertIn("⚠ Low", body)
+
+
+class TranslatorDocxPaginationTests(TestCase):
+    """Phase 3 audit: DOCX extraction page-breaks long documents correctly."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _make_docx(self, n_paragraphs: int) -> str:
+        from docx import Document as DocxDocument
+        doc = DocxDocument()
+        for i in range(n_paragraphs):
+            doc.add_paragraph(f"Paragraph {i + 1}: sample audit text for Phase 3.")
+        path = str(Path(self.temp_dir.name) / "test_long.docx")
+        doc.save(path)
+        return path
+
+    def test_long_docx_produces_multiple_pages(self):
+        """50 paragraphs must span at least 2 pages (max ~32 paragraphs per page)."""
+        from translator.services.extraction_service import ExtractionService
+        pages = ExtractionService.extract_docx_text_and_layout(self._make_docx(50))
+        self.assertGreaterEqual(len(pages), 2)
+
+    def test_long_docx_all_paragraphs_extracted(self):
+        """All 50 paragraphs must appear in the extracted layout with none dropped."""
+        from translator.services.extraction_service import ExtractionService
+        n = 50
+        pages = ExtractionService.extract_docx_text_and_layout(self._make_docx(n))
+        total_lines = sum(
+            len(block.get("lines", []))
+            for page in pages
+            for block in page.get("blocks", [])
+        )
+        self.assertEqual(total_lines, n)
+
+    def test_no_block_bbox_exceeds_page_height(self):
+        """No block bbox y1 may exceed the declared page height (prevents silent clipping)."""
+        from translator.services.extraction_service import ExtractionService
+        pages = ExtractionService.extract_docx_text_and_layout(self._make_docx(50))
+        for page in pages:
+            page_h = page.get("height", 792)
+            for block in page.get("blocks", []):
+                bbox = block.get("bbox", [0, 0, 0, page_h])
+                self.assertLessEqual(
+                    bbox[3],
+                    page_h,
+                    f"Block y1={bbox[3]} exceeds page height {page_h} on page {page.get('page')}.",
+                )
+
+
+class TranslatorOCRRotationTests(TestCase):
+    """Phase 3 audit: OCR rotation detection and _apply_rotation contract."""
+
+    def _white_image(self):
+        from PIL import Image
+        return Image.new("RGB", (100, 100), (255, 255, 255))
+
+    def test_apply_rotation_zero_is_noop(self):
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._white_image()
+        out, applied, warning = svc._apply_rotation(img, 0)
+        self.assertIs(out, img)
+        self.assertEqual(applied, 0)
+        self.assertIsNone(warning)
+
+    def test_apply_rotation_90_corrects_image(self):
+        """90° rotation: image is rotated (not left unchanged), applied=90, no warning."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._white_image()
+        out, applied, warning = svc._apply_rotation(img, 90)
+        self.assertIsNot(out, img)
+        self.assertEqual(applied, 90)
+        self.assertIsNone(warning)
+
+    def test_apply_rotation_270_corrects_image(self):
+        """270° rotation: image is rotated (not left unchanged), applied=270, no warning."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._white_image()
+        out, applied, warning = svc._apply_rotation(img, 270)
+        self.assertIsNot(out, img)
+        self.assertEqual(applied, 270)
+        self.assertIsNone(warning)
+
+    def test_apply_rotation_180_corrects_image(self):
+        """180° rotation must return a new transposed image with no warning."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._white_image()
+        out, applied, warning = svc._apply_rotation(img, 180)
+        self.assertIsNot(out, img)
+        self.assertEqual(applied, 180)
+        self.assertIsNone(warning)
+
+    def test_detect_rotation_reads_osd_output(self):
+        """_detect_rotation_deg parses Rotate: line from mocked pytesseract OSD output."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=True)
+        img = self._white_image()
+        with patch(
+            "pytesseract.image_to_osd",
+            return_value="Rotate: 90\nOrientation confidence: 3.14\n",
+        ):
+            deg = svc._detect_rotation_deg(img)
+        self.assertEqual(deg, 90)
+
+
+class TranslatorWorkflowGatingTests(TestCase):
+    """Phase 3 audit: download gating and cross-page segment ordering."""
+
+    password = "Bagobo-Test-2026!"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="alice_p3",
+            email="alice_p3@example.test",
+            password=self.password,
+        )
+
+    def _make_completed_job(self, *, with_output_file: bool = False) -> TranslationJob:
+        job = TranslationJob.objects.create(
+            owner=self.alice,
+            original_filename="audit.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            status=TranslationJob.Status.COMPLETED,
+        )
+        if with_output_file:
+            out = self.media_root / "jobs" / job.job_id / "translated.pdf"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"%PDF-1.4\n%%EOF")
+            job.output_file_path = str(out)
+            job.save(update_fields=["output_file_path"])
+        return job
+
+    def test_completed_job_without_output_file_hides_download(self):
+        """COMPLETED job with no translated PDF must not show the Download button."""
+        job = self._make_completed_job(with_output_file=False)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertNotIn(">Download<", body)
+
+    def test_completed_job_with_output_file_shows_download(self):
+        """COMPLETED job with translated PDF present must show the Download button."""
+        job = self._make_completed_job(with_output_file=True)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        body = response.content.decode("utf-8")
+        self.assertIn(">Download<", body)
+
+    def test_segment_ordering_across_pages(self):
+        """Segments from page 1 must have lower segment_index than those on page 2."""
+        from translator.services import _sync_structure_models
+
+        job = self._make_completed_job()
+        job_dir = self.media_root / "jobs" / job.job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        structure_path = str(job_dir / "structure.json")
+
+        structure = {
+            "extraction_method": "direct_pdf_text",
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width": 612,
+                    "height": 792,
+                    "rotation": 0,
+                    "blocks": [{
+                        "type": "text",
+                        "bbox": [72, 100, 540, 120],
+                        "lines": [{
+                            "source_text": "First page text.",
+                            "translated_text": "Teksto sa unang pahina.",
+                            "translation_method": "exact",
+                            "translation_confidence": 1.0,
+                            "bbox": [72, 100, 540, 120],
+                        }],
+                    }],
+                },
+                {
+                    "page_number": 2,
+                    "width": 612,
+                    "height": 792,
+                    "rotation": 0,
+                    "blocks": [{
+                        "type": "text",
+                        "bbox": [72, 100, 540, 120],
+                        "lines": [{
+                            "source_text": "Second page text.",
+                            "translated_text": "Teksto sa ikalawang pahina.",
+                            "translation_method": "exact",
+                            "translation_confidence": 1.0,
+                            "bbox": [72, 100, 540, 120],
+                        }],
+                    }],
+                },
+            ],
+        }
+        with open(structure_path, "w", encoding="utf-8") as fh:
+            json.dump(structure, fh)
+
+        _sync_structure_models(str(job.id), structure_path)
+
+        segments = list(
+            TranslationSegment.objects.filter(job=job).order_by("segment_index")
+        )
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].source_text, "First page text.")
+        self.assertEqual(segments[1].source_text, "Second page text.")
+        self.assertLess(segments[0].segment_index, segments[1].segment_index)
+
+
+class TranslatorPhase4FidelityTests(TestCase):
+    """Phase 4 audit: reconstruction fidelity, structure validation, rotation, hybrid PDF."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    # ------------------------------------------------------------------
+    # 1. Reconstruction fidelity: DOCX output contains all paragraphs
+    # ------------------------------------------------------------------
+
+    def _make_docx(self, paragraphs) -> str:
+        from docx import Document as DocxDoc
+        doc = DocxDoc()
+        for text in paragraphs:
+            doc.add_paragraph(text)
+        path = str(self.root / "test_input.docx")
+        doc.save(path)
+        return path
+
+    def test_reconstruct_docx_output_contains_all_text(self):
+        """_create_output_pdf renders translated text for every DOCX paragraph."""
+        import fitz
+        from translator.services.extraction_service import ExtractionService
+        from translator.services.pipeline_service import PipelineService
+
+        n = 5
+        source_texts = [f"Source paragraph {i + 1} content." for i in range(n)]
+        expected_translations = [f"TRANS_{i}" for i in range(n)]
+
+        docx_path = self._make_docx(source_texts)
+        layout_data = ExtractionService.extract_docx_text_and_layout(docx_path)
+
+        # Build translations keyed by source text
+        translations = {
+            src: {
+                "original": src,
+                "translated": exp,
+                "method": "test",
+                "confidence": 1.0,
+            }
+            for src, exp in zip(source_texts, expected_translations)
+        }
+
+        output_path = str(self.root / "translated.pdf")
+        pipeline = PipelineService()
+        ok = pipeline._create_output_pdf(layout_data, translations, output_path)
+        self.assertTrue(ok, "_create_output_pdf returned False")
+        self.assertTrue(Path(output_path).exists(), "Output PDF was not created")
+
+        doc = fitz.open(output_path)
+        full_text = "".join(doc[i].get_text() for i in range(doc.page_count))
+        doc.close()
+
+        for expected in expected_translations:
+            self.assertIn(
+                expected,
+                full_text,
+                f"Expected translated text '{expected}' is missing from the output PDF.",
+            )
+
+    def test_output_pdf_page_count_matches_layout(self):
+        """Output PDF has the same number of pages as the extracted layout."""
+        import fitz
+        from translator.services.extraction_service import ExtractionService
+        from translator.services.pipeline_service import PipelineService
+
+        docx_path = self._make_docx(
+            [f"Paragraph {i}." for i in range(50)]
+        )
+        layout_data = ExtractionService.extract_docx_text_and_layout(docx_path)
+        output_path = str(self.root / "paged.pdf")
+        pipeline = PipelineService()
+        pipeline._create_output_pdf(layout_data, {}, output_path)
+
+        doc = fitz.open(output_path)
+        output_page_count = doc.page_count
+        doc.close()
+
+        self.assertEqual(
+            output_page_count,
+            len(layout_data),
+            f"Output PDF has {output_page_count} pages but layout has {len(layout_data)}.",
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Structure validation
+    # ------------------------------------------------------------------
+
+    def test_validate_layout_data_accepts_valid_data(self):
+        from translator.services.pipeline_service import PipelineService
+        PipelineService._validate_layout_data([
+            {"page": 0, "width": 612.0, "height": 792.0, "blocks": []},
+        ])
+
+    def test_validate_layout_data_rejects_non_list(self):
+        from translator.services.pipeline_service import PipelineService
+        with self.assertRaises(ValueError):
+            PipelineService._validate_layout_data({"page": 0})
+
+    def test_validate_layout_data_rejects_non_dict_page(self):
+        from translator.services.pipeline_service import PipelineService
+        with self.assertRaises(ValueError):
+            PipelineService._validate_layout_data(["not-a-dict"])
+
+    def test_validate_layout_data_rejects_zero_width(self):
+        from translator.services.pipeline_service import PipelineService
+        with self.assertRaises(ValueError):
+            PipelineService._validate_layout_data([
+                {"page": 0, "width": 0, "height": 792.0, "blocks": []},
+            ])
+
+    def test_validate_layout_data_rejects_negative_height(self):
+        from translator.services.pipeline_service import PipelineService
+        with self.assertRaises(ValueError):
+            PipelineService._validate_layout_data([
+                {"page": 0, "width": 612.0, "height": -1.0, "blocks": []},
+            ])
+
+    def test_validate_layout_data_allows_none_dimensions(self):
+        """None width/height are skipped (reconstruction defaults to 612×792)."""
+        from translator.services.pipeline_service import PipelineService
+        PipelineService._validate_layout_data([
+            {"page": 0, "width": None, "height": None, "blocks": []},
+        ])
+
+    # ------------------------------------------------------------------
+    # 3. OCR 90°/270° rotation: image rotation + bbox inverse transform
+    # ------------------------------------------------------------------
+
+    def _solid_image(self, w: int, h: int, color=(255, 255, 255)):
+        from PIL import Image
+        return Image.new("RGB", (w, h), color)
+
+    def test_apply_rotation_90_rotates_image_dimensions(self):
+        """Rotating a 100×60 image 90° CW produces a 60×100 image."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._solid_image(100, 60)
+        out, applied, warning = svc._apply_rotation(img, 90)
+        self.assertEqual(applied, 90)
+        self.assertIsNone(warning)
+        self.assertEqual(out.size, (60, 100), "90° CW should swap width and height.")
+
+    def test_apply_rotation_270_rotates_image_dimensions(self):
+        """Rotating a 100×60 image 90° CCW produces a 60×100 image."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False)
+        img = self._solid_image(100, 60)
+        out, applied, warning = svc._apply_rotation(img, 270)
+        self.assertEqual(applied, 270)
+        self.assertIsNone(warning)
+        self.assertEqual(out.size, (60, 100), "270° correction should swap width and height.")
+
+    def test_flip_layout_90_cw_maps_corners_correctly(self):
+        """_flip_page_layout_90_cw maps top-left in rotated space to top-right in original."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        # Original page: 595 × 842 pt (portrait)
+        # After 90° CW correction: OCR space is 842 × 595
+        orig_w, orig_h = 595.0, 842.0
+        page_layout = {
+            "width": orig_w,
+            "height": orig_h,
+            "blocks": [{"type": "text", "bbox": [0.0, 0.0, 10.0, 10.0], "lines": [
+                {"text": "hi", "bbox": [0.0, 0.0, 10.0, 10.0]}
+            ]}],
+        }
+        result = OCRService._flip_page_layout_90_cw(page_layout, orig_w, orig_h)
+        # [ry0, h - rx1, ry1, h - rx0] = [0, 842-10, 10, 842-0] = [0, 832, 10, 842]
+        self.assertEqual(result["blocks"][0]["bbox"], [0.0, 832.0, 10.0, 842.0])
+        self.assertEqual(result["blocks"][0]["lines"][0]["bbox"], [0.0, 832.0, 10.0, 842.0])
+        self.assertEqual(result["width"], orig_w)
+        self.assertEqual(result["height"], orig_h)
+
+    def test_flip_layout_270_cw_maps_corners_correctly(self):
+        """_flip_page_layout_270_cw maps top-left in rotated space to bottom-left in original."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        orig_w, orig_h = 595.0, 842.0
+        page_layout = {
+            "width": orig_w,
+            "height": orig_h,
+            "blocks": [{"type": "text", "bbox": [0.0, 0.0, 10.0, 10.0], "lines": [
+                {"text": "hi", "bbox": [0.0, 0.0, 10.0, 10.0]}
+            ]}],
+        }
+        result = OCRService._flip_page_layout_270_cw(page_layout, orig_w, orig_h)
+        # [w - ry1, rx0, w - ry0, rx1] = [595-10, 0, 595-0, 10] = [585, 0, 595, 10]
+        self.assertEqual(result["blocks"][0]["bbox"], [585.0, 0.0, 595.0, 10.0])
+        self.assertEqual(result["width"], orig_w)
+        self.assertEqual(result["height"], orig_h)
+
+    # ------------------------------------------------------------------
+    # 4. Hybrid PDF: per-page extraction metadata
+    # ------------------------------------------------------------------
+
+    def _make_minimal_pdf(self, *, n_chars: int = 200) -> str:
+        """Create a single-page digital PDF with n_chars of text."""
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), "A" * n_chars, fontsize=12)
+        path = str(self.root / "digital.pdf")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_hybrid_pdf_digital_only_sets_direct_pdf_text_method(self):
+        """A PDF where all pages are digital should set extraction_method=direct_pdf_text."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import FileType, DetectionType
+
+        pdf_path = self._make_minimal_pdf(n_chars=200)
+        job = JobStatus("test-hybrid-digital")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        pipeline = PipelineService()
+        layout_data, _ = pipeline._extract_hybrid_pdf(pdf_path, None, job)
+
+        self.assertEqual(job.metadata.get("extraction_method"), "direct_pdf_text")
+        self.assertGreater(len(layout_data), 0)
+        self.assertEqual(job.metadata["page_extraction_methods"]["0"], "digital")
+
+    def test_hybrid_pdf_low_text_page_is_marked_scanned(self):
+        """A nearly-blank PDF page is classified as scanned in page_extraction_methods."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import FileType, DetectionType
+
+        # Create a blank (0-char) single-page PDF
+        doc = fitz.open()
+        doc.new_page(width=612, height=792)
+        pdf_path = str(self.root / "blank.pdf")
+        doc.save(pdf_path)
+        doc.close()
+
+        job = JobStatus("test-hybrid-blank")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        pipeline = PipelineService()
+        layout_data, _ = pipeline._extract_hybrid_pdf(pdf_path, None, job)
+
+        self.assertEqual(job.metadata["page_extraction_methods"]["0"], "ocr")
+
+    # ------------------------------------------------------------------
+    # 5. Generated output gating
+    # ------------------------------------------------------------------
+
+    def test_output_file_not_created_when_no_text_blocks(self):
+        """_create_output_pdf still returns True and creates a PDF even with empty layout."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        output_path = str(self.root / "empty_out.pdf")
+        pipeline = PipelineService()
+        ok = pipeline._create_output_pdf(
+            [{"page": 0, "width": 612, "height": 792, "blocks": []}],
+            {},
+            output_path,
+        )
+        self.assertTrue(ok)
+        self.assertTrue(Path(output_path).exists())
+        doc = fitz.open(output_path)
+        self.assertEqual(doc.page_count, 1)
+        doc.close()

@@ -39,6 +39,7 @@ class OCRService:
         detect_orientation: bool = True,
         threshold: bool = True,
         timeout_seconds: Optional[int] = None,
+        psm: int = 3,
     ):
         # DPI 300 is the Tesseract-recommended minimum for reliable OCR.
         # 200 DPI was used previously; raising to 300 improves recognition
@@ -50,6 +51,9 @@ class OCRService:
         self.threshold_enabled = threshold
         self.detect_orientation_enabled = detect_orientation
         self.timeout_seconds = timeout_seconds or self._default_timeout_seconds()
+        # PSM 3 = auto page segmentation (default Tesseract behaviour).
+        # PSM 4/6 may improve multi-column layouts — configurable per job.
+        self.psm = int(psm) if psm in range(14) else 3
         self._verified: Optional[bool] = None
         self._installed_languages: Optional[List[str]] = None
         # OSD support is checked lazily and cached. None = unknown, False = OSD
@@ -370,20 +374,29 @@ class OCRService:
             return 0
 
     def _apply_rotation(self, img, rotate_deg: int):
-        """Rotate the image to upright if we can do so safely.
+        """Rotate the image to upright.
 
-        Returns (image, applied_deg, warning_or_none). We only physically
-        rotate for 180 degrees — that case has trivial bbox inversion and
-        preserves dimensions. For 90 / 270 we leave the image alone and
-        surface a warning, because bbox transforms under 90-deg rotation
-        require swapping page dimensions and we want to keep the JSON
-        contract stable.
+        Returns (image, applied_deg, warning_or_none).
+        - 180°: trivial flip, same dimensions, bboxes flipped via _flip_page_layout_180.
+        - 90°:  Tesseract OSD says "Rotate: 90" — the image is 90° CCW from upright.
+                Correct by rotating 90° CW (PIL ROTATE_270 = 270° CCW = 90° CW).
+                Bboxes are remapped by _flip_page_layout_90_cw.
+        - 270°: image is 90° CW from upright.  Correct by rotating 90° CCW
+                (PIL ROTATE_90). Bboxes remapped by _flip_page_layout_270_cw.
         """
         if rotate_deg == 0:
             return img, 0, None
         if rotate_deg == 180:
             from PIL import Image
             return img.transpose(Image.ROTATE_180), 180, None
+        if rotate_deg == 90:
+            from PIL import Image
+            # 90° CW correction: transpose with ROTATE_270 (270° CCW = 90° CW).
+            return img.transpose(Image.ROTATE_270), 90, None
+        if rotate_deg == 270:
+            from PIL import Image
+            # 90° CCW correction: transpose with ROTATE_90 (90° CCW).
+            return img.transpose(Image.ROTATE_90), 270, None
         return img, 0, (
             f"Page appears rotated by {rotate_deg} degrees. "
             "OCR was run without rotation; results may be poor."
@@ -409,6 +422,76 @@ class OCRService:
             block["bbox"] = flip(block.get("bbox"))
             for line in block.get("lines", []):
                 line["bbox"] = flip(line.get("bbox"))
+        return page_layout
+
+    @staticmethod
+    def _flip_page_layout_90_cw(
+        page_layout: Dict[str, Any],
+        orig_w_pt: float,
+        orig_h_pt: float,
+    ) -> Dict[str, Any]:
+        """Map bboxes from 90°-CW-corrected frame back to original page frame.
+
+        When OSD says "Rotate: 90" the image was 90° CCW from upright.
+        We rotated it 90° CW before OCR, producing a (H_pt × W_pt) image.
+        Tesseract bboxes are in that rotated space.
+
+        Inverse of 90° CW:
+            (rx, ry)  →  (ry, orig_h_pt − rx)
+
+        For bbox (rx0, ry0, rx1, ry1):
+            orig_x0 = ry0,              orig_y0 = orig_h_pt − rx1
+            orig_x1 = ry1,              orig_y1 = orig_h_pt − rx0
+        """
+
+        def flip(bbox):
+            if not bbox or len(bbox) != 4:
+                return bbox
+            rx0, ry0, rx1, ry1 = [float(v) for v in bbox]
+            return [ry0, orig_h_pt - rx1, ry1, orig_h_pt - rx0]
+
+        for block in page_layout.get("blocks", []):
+            block["bbox"] = flip(block.get("bbox"))
+            for line in block.get("lines", []):
+                line["bbox"] = flip(line.get("bbox"))
+
+        page_layout["width"] = orig_w_pt
+        page_layout["height"] = orig_h_pt
+        return page_layout
+
+    @staticmethod
+    def _flip_page_layout_270_cw(
+        page_layout: Dict[str, Any],
+        orig_w_pt: float,
+        orig_h_pt: float,
+    ) -> Dict[str, Any]:
+        """Map bboxes from 90°-CCW-corrected frame back to original page frame.
+
+        When OSD says "Rotate: 270" the image was 90° CW from upright.
+        We rotated it 90° CCW before OCR (PIL ROTATE_90), producing a
+        (H_pt × W_pt) image.
+
+        Inverse of 90° CCW:
+            (rx, ry)  →  (orig_w_pt − ry, rx)
+
+        For bbox (rx0, ry0, rx1, ry1):
+            orig_x0 = orig_w_pt − ry1,  orig_y0 = rx0
+            orig_x1 = orig_w_pt − ry0,  orig_y1 = rx1
+        """
+
+        def flip(bbox):
+            if not bbox or len(bbox) != 4:
+                return bbox
+            rx0, ry0, rx1, ry1 = [float(v) for v in bbox]
+            return [orig_w_pt - ry1, rx0, orig_w_pt - ry0, rx1]
+
+        for block in page_layout.get("blocks", []):
+            block["bbox"] = flip(block.get("bbox"))
+            for line in block.get("lines", []):
+                line["bbox"] = flip(line.get("bbox"))
+
+        page_layout["width"] = orig_w_pt
+        page_layout["height"] = orig_h_pt
         return page_layout
 
     def _ocr_image(
@@ -437,11 +520,13 @@ class OCRService:
         if rot_warning:
             warnings.append(rot_warning)
 
+        psm_config = f"--psm {self.psm}"
         try:
             data = pytesseract.image_to_data(
                 img,
                 output_type=Output.DICT,
                 lang=lang,
+                config=psm_config,
                 timeout=self.timeout_seconds,
             )
         except Exception as e:
@@ -455,6 +540,7 @@ class OCRService:
                         img,
                         output_type=Output.DICT,
                         lang="eng",
+                        config=psm_config,
                         timeout=self.timeout_seconds,
                     )
                 except Exception as retry_e:
@@ -481,6 +567,10 @@ class OCRService:
         )
         if applied_deg == 180:
             page_layout = self._flip_page_layout_180(page_layout)
+        elif applied_deg == 90:
+            page_layout = self._flip_page_layout_90_cw(page_layout, page_w_pt, page_h_pt)
+        elif applied_deg == 270:
+            page_layout = self._flip_page_layout_270_cw(page_layout, page_w_pt, page_h_pt)
         if warnings:
             page_layout["ocr_warning"] = "; ".join(warnings)
         return page_layout

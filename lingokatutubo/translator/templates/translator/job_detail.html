@@ -16,7 +16,7 @@
         <h1>{{ document_title }}</h1>
         <p class="page-subtitle">{{ job.source_language }} → {{ job.target_language }}</p>
       </div>
-      <span class="status-pill {{ status_class }} status-pill-lg" role="status">{{ status_label }}</span>
+      <span id="job-status-pill" class="status-pill {{ status_class }} status-pill-lg" role="status">{{ status_label }}</span>
     </div>
   </header>
 
@@ -76,21 +76,6 @@
 
       <dl class="job-meta-list">
         <div class="job-meta-row">
-          <dt>Status</dt>
-          <dd><span id="job-status-pill" class="status-pill {{ status_class }}" role="status">{{ status_label }}</span></dd>
-        </div>
-
-        <div class="job-meta-row">
-          <dt>Progress</dt>
-          <dd><span id="job-progress-text">{{ progress_percent }}%</span></dd>
-        </div>
-
-        <div class="job-meta-row">
-          <dt>Current Phase</dt>
-          <dd><span id="job-current-phase">{{ job.current_phase|default:"queued" }}</span></dd>
-        </div>
-
-        <div class="job-meta-row">
           <dt>Current Step</dt>
           <dd id="job-current-step">
             {% if has_failed %}
@@ -99,19 +84,6 @@
               {{ job.current_step }}
             {% else %}
               <span class="text-muted">—</span>
-            {% endif %}
-          </dd>
-        </div>
-
-        <div class="job-meta-row">
-          <dt>Message</dt>
-          <dd id="job-phase-message">
-            {% if has_failed %}
-              Translation failed safely.
-            {% elif job.phase_message %}
-              {{ job.phase_message }}
-            {% else %}
-              <span class="text-muted">No message available.</span>
             {% endif %}
           </dd>
         </div>
@@ -138,45 +110,6 @@
               {{ completed_at|date:"M j, Y H:i" }}
             {% else %}
               <span class="text-muted">Not completed</span>
-            {% endif %}
-          </dd>
-        </div>
-
-        {# Phase 4: Extraction Method #}
-        {% if extraction_method_label and extraction_method_label != "—" %}
-        <div class="job-meta-row">
-          <dt>Extraction Method</dt>
-          <dd>
-            <span class="badge-method">{{ extraction_method_label }}</span>
-          </dd>
-        </div>
-        {% endif %}
-
-        {# Phase 4: OCR Confidence — only meaningful for OCR path #}
-        <div class="job-meta-row">
-          <dt>OCR Confidence</dt>
-          <dd>
-            {% if extraction_method == "ocr_image" %}
-              {% if ocr_confidence_pct is not None %}
-                <div class="ocr-confidence-row">
-                  <div class="ocr-confidence-bar-wrap" role="progressbar"
-                       aria-valuenow="{{ ocr_confidence_pct }}" aria-valuemin="0" aria-valuemax="100"
-                       aria-label="OCR confidence {{ ocr_confidence_pct }}%">
-                    <div class="ocr-confidence-bar {% if ocr_has_low_quality %}ocr-conf-low{% else %}ocr-conf-ok{% endif %}"
-                         style="width:{{ ocr_confidence_pct }}%"></div>
-                  </div>
-                  <span class="ocr-confidence-label {% if ocr_has_low_quality %}text-warning{% endif %}">
-                    {{ ocr_confidence_pct }}%
-                    {% if ocr_has_low_quality %}
-                      <span class="badge-warning" title="Low OCR quality may affect translation accuracy">⚠ Low</span>
-                    {% endif %}
-                  </span>
-                </div>
-              {% else %}
-                <span class="text-muted">Not computed</span>
-              {% endif %}
-            {% else %}
-              <span class="text-muted">N/A (not an OCR document)</span>
             {% endif %}
           </dd>
         </div>
@@ -211,20 +144,60 @@
         </div>
       </dl>
 
-      {# Phase 4: OCR Warnings collapsible section #}
-      {% if ocr_warnings %}
-      <details class="ocr-warnings-panel" id="ocr-warnings-panel">
-        <summary class="ocr-warnings-summary">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
-               aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          OCR Quality Warnings ({{ ocr_warnings|length }})
-        </summary>
-        <ul class="ocr-warnings-list" role="list">
-          {% for warning in ocr_warnings %}
-            <li>{{ warning }}</li>
-          {% endfor %}
-        </ul>
+      {# Technical details: Extraction Method, OCR Confidence, and OCR Warnings #}
+      {% if extraction_method_label and extraction_method_label != "—" or extraction_method == "ocr_image" or ocr_warnings %}
+      <details class="technical-details-panel">
+        <summary class="technical-details-summary">Technical Details</summary>
+        <dl class="job-meta-list technical-meta">
+          {% if extraction_method_label and extraction_method_label != "—" %}
+          <div class="job-meta-row">
+            <dt>Extraction Method</dt>
+            <dd><span class="badge-method">{{ extraction_method_label }}</span></dd>
+          </div>
+          {% endif %}
+
+          {% if extraction_method == "ocr_image" %}
+          <div class="job-meta-row">
+            <dt>OCR Confidence</dt>
+            <dd>
+              {% if ocr_confidence_pct is not None %}
+                <div class="ocr-confidence-row">
+                  <div class="ocr-confidence-bar-wrap" role="progressbar"
+                       aria-valuenow="{{ ocr_confidence_pct }}" aria-valuemin="0" aria-valuemax="100"
+                       aria-label="OCR confidence {{ ocr_confidence_pct }}%">
+                    <div class="ocr-confidence-bar {% if ocr_has_low_quality %}ocr-conf-low{% else %}ocr-conf-ok{% endif %}"
+                         style="width:{{ ocr_confidence_pct }}%"></div>
+                  </div>
+                  <span class="ocr-confidence-label {% if ocr_has_low_quality %}text-warning{% endif %}">
+                    {{ ocr_confidence_pct }}%
+                    {% if ocr_has_low_quality %}
+                      <span class="badge-warning" title="Low OCR quality may affect translation accuracy">⚠ Low</span>
+                    {% endif %}
+                  </span>
+                </div>
+              {% else %}
+                <span class="text-muted">Not computed</span>
+              {% endif %}
+            </dd>
+          </div>
+          {% endif %}
+        </dl>
+
+        {% if ocr_warnings %}
+        <div class="ocr-warnings-panel" id="ocr-warnings-panel">
+          <p class="ocr-warnings-summary">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            OCR Quality Warnings ({{ ocr_warnings|length }})
+          </p>
+          <ul class="ocr-warnings-list" role="list">
+            {% for warning in ocr_warnings %}
+              <li>{{ warning }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
       </details>
       {% endif %}
 

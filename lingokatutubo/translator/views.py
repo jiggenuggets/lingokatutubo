@@ -10,6 +10,7 @@ from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.admin.views.decorators import staff_member_required
+from django.core.paginator import Paginator
 from django.db import connection
 from django.db.models import Avg, Count, Prefetch, Q
 from django.http import FileResponse, Http404, JsonResponse
@@ -191,7 +192,13 @@ def job_detail(request, job_id):
     if not job:
         raise Http404("Job not found")
 
-    return render(request, "translator/job_detail.html", _job_card_context(job))
+    context = _job_card_context(job)
+    # Suppress the global active-job banner when we're already viewing this job's detail page
+    context["hide_active_job_banner"] = context["is_processing"]
+    return render(request, "translator/job_detail.html", context)
+
+
+PREVIEW_SEGMENTS_PER_PAGE = 25
 
 
 @login_required
@@ -199,12 +206,6 @@ def preview(request, job_id):
     job = (
         _owned_jobs_queryset(request)
         .prefetch_related(
-            Prefetch(
-                "segments",
-                queryset=TranslationSegment.objects.select_related("page").order_by(
-                    "segment_index"
-                ),
-            ),
             "ocr_results",
             "generated_outputs",
             "pages",
@@ -243,6 +244,18 @@ def preview(request, job_id):
 
         return redirect("translator:job_detail", job_id=job.id)
 
+    segments_qs = (
+        TranslationSegment.objects.filter(job=job)
+        .select_related("page")
+        .order_by("segment_index")
+    )
+    paginator = Paginator(segments_qs, PREVIEW_SEGMENTS_PER_PAGE)
+    try:
+        page_number = int(request.GET.get("page", 1))
+    except (ValueError, TypeError):
+        page_number = 1
+    segments_page = paginator.get_page(page_number)
+
     return render(
         request,
         "translator/preview.html",
@@ -251,7 +264,8 @@ def preview(request, job_id):
             "uploaded_document": getattr(job, "uploaded_document", None),
             "document_pages": list(job.pages.all()),
             "ocr_result": job.ocr_results.first(),
-            "segments": list(job.segments.all()),
+            "segments": segments_page,
+            "total_segments": paginator.count,
             "generated_outputs": list(job.generated_outputs.all()),
             "ocr_summary": _ocr_summary(job),
             "image_preview": _image_preview_context(job),
@@ -997,10 +1011,6 @@ def _translation_confidence(job: TranslationJob):
 
     aggregate = job.segments.aggregate(value=Avg("confidence"))
     return aggregate["value"]
-
-
-def _translation_confidence_pct(job: TranslationJob):
-    return _confidence_pct(_translation_confidence(job))
 
 
 def _confidence_pct(confidence):

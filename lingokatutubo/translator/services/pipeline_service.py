@@ -199,8 +199,13 @@ class PipelineService:
 
             if job.detection_type == DetectionType.DIGITAL:
                 if file_type == FileType.PDF:
-                    layout_data = self.extraction_service.extract_pdf_text_and_layout(input_file_path)
-                    job.metadata["extraction_method"] = "direct_pdf_text"
+                    # Use per-page hybrid extraction so mixed digital/scanned
+                    # PDFs route each page to the right extraction method.
+                    layout_data, ocr_unavailable_msg = self._extract_hybrid_pdf(
+                        input_file_path,
+                        requested_ocr_languages,
+                        job,
+                    )
                 elif file_type == FileType.DOCX:
                     layout_data = self.extraction_service.extract_docx_text_and_layout(input_file_path)
                     job.metadata["extraction_method"] = "docx_text"
@@ -273,6 +278,16 @@ class PipelineService:
             # so callers can inspect the warnings.
             if layout_data is None:
                 layout_data = []
+
+            # Structural validation: fail early with a clear message rather than
+            # letting a malformed layout silently produce broken reconstruction output.
+            try:
+                self._validate_layout_data(layout_data)
+            except ValueError as validation_err:
+                raise Exception(
+                    f"Extracted layout validation failed: {validation_err}"
+                )
+
             job.metadata["layout_blocks"] = len(layout_data)
             self._persist_job(job)
 
@@ -605,6 +620,48 @@ class PipelineService:
                     translations[block_id] = record
         
         return translations
+
+    @staticmethod
+    def _validate_layout_data(layout_data: list) -> None:
+        """Validate extracted layout data before reconstruction.
+
+        Raises ValueError with an actionable message on structural problems
+        that would cause reconstruction to silently produce bad output:
+        - not a list
+        - page entry not a dict
+        - non-positive or invalid page dimensions
+
+        Individual invalid bboxes are handled gracefully by the reconstruction
+        service (skipped with warnings) so are not treated as fatal here.
+        """
+        if not isinstance(layout_data, list):
+            raise ValueError(
+                "Extracted layout data is malformed (expected a list of pages); "
+                "cannot proceed to reconstruction."
+            )
+        for page_idx, page in enumerate(layout_data):
+            label = f"Page {page_idx + 1}"
+            if not isinstance(page, dict):
+                raise ValueError(
+                    f"{label} entry is malformed (expected a dict); "
+                    "cannot proceed to reconstruction."
+                )
+            for dim_name in ("width", "height"):
+                raw = page.get(dim_name)
+                if raw is None:
+                    continue
+                try:
+                    val = float(raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"{label} has an invalid {dim_name} value ({raw!r}); "
+                        f"cannot reconstruct output: {exc}"
+                    )
+                if val <= 0:
+                    raise ValueError(
+                        f"{label} has a non-positive {dim_name} ({val}); "
+                        "reconstruction requires positive page dimensions."
+                    )
 
     @staticmethod
     def _extract_txt_text_and_layout(txt_path: str) -> List[Dict[str, Any]]:
@@ -1044,6 +1101,133 @@ class PipelineService:
                 json.dump(structure, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[Pipeline] Failed to append layout warnings to structure.json: {e}")
+
+    def _extract_hybrid_pdf(
+        self,
+        pdf_path: str,
+        requested_ocr_languages: Optional[List[str]],
+        job: "JobStatus",
+    ) -> tuple:
+        """Per-page hybrid extraction: digital pages use PyMuPDF, scanned use OCR.
+
+        Returns (layout_data, ocr_unavailable_msg).
+
+        Each page is classified independently using MIN_CHARS_PER_PAGE.
+        The extraction_method stored in job.metadata is:
+        - "direct_pdf_text"  when every page is digital
+        - "ocr_image"        when every page is scanned
+        - "hybrid"           when both methods are used
+
+        Per-page extraction method is stored in metadata["page_extraction_methods"].
+        """
+        from .detection_service import MIN_CHARS_PER_PAGE
+        from .extraction_service import ExtractionService
+
+        import fitz
+
+        layout_data: List[Dict[str, Any]] = []
+        ocr_unavailable_msg: Optional[str] = None
+        page_methods: Dict[int, str] = {}
+        digital_count = 0
+        scanned_count = 0
+
+        lang = "eng"
+        language_warnings: List[str] = []
+        if requested_ocr_languages:
+            try:
+                lang, language_warnings = self.ocr_service.resolve_tesseract_language(
+                    requested_ocr_languages
+                )
+            except Exception:
+                pass
+
+        scale = 72.0 / float(getattr(self.ocr_service, "dpi", 300))
+
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception as exc:
+            return [], str(exc)
+
+        try:
+            for page_idx in range(doc.page_count):
+                page = doc[page_idx]
+                text = page.get_text()
+                char_count = len(
+                    text.replace(" ", "").replace("\n", "").replace("\t", "")
+                )
+
+                if char_count >= MIN_CHARS_PER_PAGE:
+                    page_data = ExtractionService._extract_page_digital(page, page_idx)
+                    page_methods[page_idx] = "digital"
+                    digital_count += 1
+                else:
+                    if ocr_unavailable_msg:
+                        page_data = {
+                            "page": page_idx,
+                            "width": float(page.rect.width),
+                            "height": float(page.rect.height),
+                            "rotation": page.rotation,
+                            "blocks": [],
+                            "ocr_warning": "OCR unavailable; page was not extracted.",
+                        }
+                    else:
+                        try:
+                            from PIL import Image
+                            import io as _io
+                            dpi = getattr(self.ocr_service, "dpi", 300)
+                            mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+                            pix = page.get_pixmap(matrix=mat, alpha=False)
+                            img = Image.open(_io.BytesIO(pix.tobytes("png")))
+                            page_data = self.ocr_service._ocr_image(
+                                img,
+                                page_idx,
+                                float(page.rect.width),
+                                float(page.rect.height),
+                                scale,
+                                lang=lang,
+                                language_warnings=language_warnings if page_idx == 0 else None,
+                            )
+                        except OCRUnavailableError as exc:
+                            ocr_unavailable_msg = str(exc)
+                            page_data = {
+                                "page": page_idx,
+                                "width": float(page.rect.width),
+                                "height": float(page.rect.height),
+                                "rotation": page.rotation,
+                                "blocks": [],
+                                "ocr_warning": f"OCR unavailable: {exc}",
+                            }
+                        except Exception as exc:
+                            page_data = {
+                                "page": page_idx,
+                                "width": float(page.rect.width),
+                                "height": float(page.rect.height),
+                                "rotation": page.rotation,
+                                "blocks": [],
+                                "ocr_error": str(exc),
+                            }
+                    page_methods[page_idx] = "ocr"
+                    scanned_count += 1
+
+                layout_data.append(page_data)
+        finally:
+            doc.close()
+
+        if digital_count > 0 and scanned_count > 0:
+            method = "hybrid"
+        elif scanned_count > 0:
+            method = "ocr_image"
+        else:
+            method = "direct_pdf_text"
+
+        job.metadata["extraction_method"] = method
+        job.metadata["page_extraction_methods"] = {
+            str(k): v for k, v in page_methods.items()
+        }
+        if language_warnings:
+            job.metadata.setdefault("ocr_warnings", []).extend(language_warnings)
+
+        return layout_data, ocr_unavailable_msg
 
     def _create_output_pdf(
         self,

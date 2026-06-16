@@ -158,6 +158,62 @@ class ExtractionService:
             })
         return drawing_blocks
     
+    @classmethod
+    def _extract_page_digital(cls, page: "fitz.Page", page_num: int) -> Dict[str, Any]:
+        """Extract digital text and layout from a single open PyMuPDF page.
+
+        Returns a page_data dict in the same shape as extract_pdf_text_and_layout.
+        Callers are responsible for opening/closing the fitz.Document.
+        """
+        page_height = page.rect.height
+        page_width = page.rect.width
+        text_dict = page.get_text("dict")
+        blocks = text_dict.get("blocks", [])
+
+        page_data: Dict[str, Any] = {
+            "page": page_num,
+            "width": float(page_width),
+            "height": float(page_height),
+            "rotation": page.rotation,
+            "blocks": [],
+        }
+
+        for block in blocks:
+            if block.get("type") == 0:
+                block_bbox = cls._bbox_to_list(block.get("bbox"))
+                block_lines = block.get("lines", [])
+                block_data: Dict[str, Any] = {"type": "text", "bbox": block_bbox, "lines": []}
+                for line in block_lines:
+                    line_bbox = cls._bbox_to_list(line.get("bbox"))
+                    line_text = ""
+                    spans = line.get("spans", [])
+                    span_metadata = []
+                    for span in spans:
+                        line_text += span.get("text", "")
+                        span_metadata.append(cls._span_metadata(span))
+                    if line_text.strip():
+                        first_span = next(
+                            (s for s in spans if (s.get("text") or "").strip()),
+                            spans[0] if spans else {},
+                        )
+                        block_data["lines"].append({
+                            "text": line_text,
+                            "bbox": line_bbox,
+                            "font": first_span.get("font", "") if first_span else "",
+                            "size": first_span.get("size") if first_span else None,
+                            "color": cls._color_to_rgb(first_span.get("color")) if first_span else None,
+                            "flags": first_span.get("flags") if first_span else None,
+                            "spans": span_metadata,
+                        })
+                if block_data["lines"]:
+                    page_data["blocks"].append(block_data)
+            elif block.get("type") == 1:
+                page_data["blocks"].append(cls._image_block_metadata(block))
+
+        page_data["blocks"].extend(cls._extract_table_blocks(page))
+        page_data["blocks"].extend(cls._extract_drawing_blocks(page))
+        return page_data
+
     @staticmethod
     def extract_pdf_text_and_layout(pdf_path: str) -> List[Dict[str, Any]]:
         """
@@ -173,75 +229,10 @@ class ExtractionService:
         
         try:
             doc = fitz.open(pdf_path)
-            
             for page_num in range(doc.page_count):
-                page = doc[page_num]
-                page_height = page.rect.height
-                page_width = page.rect.width
-                
-                # Extract text with bounding boxes
-                text_dict = page.get_text("dict")
-                blocks = text_dict.get("blocks", [])
-                
-                page_data = {
-                    "page": page_num,
-                    "width": float(page_width),
-                    "height": float(page_height),
-                    "rotation": page.rotation,
-                    "blocks": []
-                }
-                
-                for block in blocks:
-                    if block.get("type") == 0:  # Text block
-                        block_bbox = ExtractionService._bbox_to_list(block.get("bbox"))
-                        block_lines = block.get("lines", [])
-                        
-                        block_data = {
-                            "type": "text",
-                            "bbox": block_bbox,
-                            "lines": []
-                        }
-                        
-                        for line in block_lines:
-                            line_bbox = ExtractionService._bbox_to_list(line.get("bbox"))
-                            line_text = ""
-                            spans = line.get("spans", [])
-                            span_metadata = []
-                            
-                            for span in spans:
-                                line_text += span.get("text", "")
-                                span_metadata.append(ExtractionService._span_metadata(span))
-                            
-                            if line_text.strip():
-                                first_span = next(
-                                    (
-                                        span
-                                        for span in spans
-                                        if (span.get("text") or "").strip()
-                                    ),
-                                    spans[0] if spans else {},
-                                )
-                                block_data["lines"].append({
-                                    "text": line_text,
-                                    "bbox": line_bbox,
-                                    "font": first_span.get("font", "") if first_span else "",
-                                    "size": first_span.get("size") if first_span else None,
-                                    "color": ExtractionService._color_to_rgb(first_span.get("color")) if first_span else None,
-                                    "flags": first_span.get("flags") if first_span else None,
-                                    "spans": span_metadata,
-                                })
-                        
-                        if block_data["lines"]:
-                            page_data["blocks"].append(block_data)
-                    
-                    elif block.get("type") == 1:  # Image block
-                        page_data["blocks"].append(ExtractionService._image_block_metadata(block))
-
-                page_data["blocks"].extend(ExtractionService._extract_table_blocks(page))
-                page_data["blocks"].extend(ExtractionService._extract_drawing_blocks(page))
-                
-                pages_data.append(page_data)
-            
+                pages_data.append(
+                    ExtractionService._extract_page_digital(doc[page_num], page_num)
+                )
             doc.close()
         
         except Exception as e:
@@ -251,56 +242,82 @@ class ExtractionService:
     
     @staticmethod
     def extract_docx_text_and_layout(docx_path: str) -> List[Dict[str, Any]]:
+        """Extract text from DOCX file with automatic page-breaking.
+
+        DOCX has no native page concept, so we simulate pages using a
+        fixed usable height.  Each paragraph occupies LINE_HEIGHT points.
+        When a paragraph would overflow the page it starts a fresh one,
+        preventing silent text clipping in the reconstructed output PDF.
         """
-        Extract text from DOCX file
-        
-        DOCX doesn't have concept of "pages" but we'll return paragraphs with metadata
-        
-        Args:
-            docx_path: Path to DOCX file
-        
-        Returns:
-            List of pages with text blocks
-        """
-        pages_data = []
-        
+        PAGE_W: float = 612.0
+        PAGE_H: float = 792.0
+        LEFT: float = 72.0
+        RIGHT: float = 540.0
+        TOP_MARGIN: float = 72.0
+        BOTTOM_MARGIN: float = 720.0   # 72 pt bottom gutter
+        LINE_H: float = 20.0
+
+        pages_data: List[Dict[str, Any]] = []
+        current_blocks: List[Dict[str, Any]] = []
+        current_y: float = TOP_MARGIN
+
+        def _flush_page() -> None:
+            pages_data.append({
+                "page": len(pages_data),
+                "width": PAGE_W,
+                "height": PAGE_H,
+                "rotation": 0,
+                "blocks": current_blocks.copy(),
+            })
+            current_blocks.clear()
+
         try:
             doc = Document(docx_path)
-            
-            # Group into pages (rough estimate based on paragraph count)
-            page_data = {
-                "page": 0,
-                "width": 612,  # Standard letter width in points
-                "height": 792,  # Standard letter height in points
-                "blocks": []
-            }
-            
+
             for para in doc.paragraphs:
                 text = para.text.strip()
                 if not text:
                     continue
-                
-                # Detect heading style
+
+                # Start a new page when the next paragraph would overflow.
+                if current_y + LINE_H > BOTTOM_MARGIN:
+                    _flush_page()
+                    current_y = TOP_MARGIN
+
                 is_heading = para.style.name.startswith("Heading")
-                
+                try:
+                    font_name = para.style.font.name or "Calibri"
+                except Exception:
+                    font_name = "Calibri"
+
+                bbox = [LEFT, current_y, RIGHT, current_y + LINE_H]
                 block_data = {
                     "type": "text",
-                    "bbox": [50, len(page_data["blocks"]) * 20, 562, len(page_data["blocks"]) * 20 + 20],
+                    "bbox": bbox,
                     "lines": [{
                         "text": text,
-                        "bbox": [50, len(page_data["blocks"]) * 20, 562, len(page_data["blocks"]) * 20 + 20],
-                        "font": para.style.font.name if para.style.font else "Calibri",
-                        "is_heading": is_heading
-                    }]
+                        "bbox": bbox,
+                        "font": font_name,
+                        "is_heading": is_heading,
+                    }],
                 }
-                
-                page_data["blocks"].append(block_data)
-            
-            pages_data.append(page_data)
-        
+                current_blocks.append(block_data)
+                current_y += LINE_H
+
+            # Always emit at least one page (even if the document is empty).
+            _flush_page()
+
         except Exception as e:
             print(f"[Extraction] Error extracting DOCX: {e}")
-        
+            if not pages_data:
+                pages_data.append({
+                    "page": 0,
+                    "width": PAGE_W,
+                    "height": PAGE_H,
+                    "rotation": 0,
+                    "blocks": [],
+                })
+
         return pages_data
     
     @staticmethod

@@ -66,12 +66,12 @@
     <section class="bilingual-panel">
       <div class="section-title-row">
         <h2>Aligned Text</h2>
-        {% if segments %}
-          <span class="segment-count-badge">{{ segments|length }} segment{{ segments|length|pluralize }}</span>
+        {% if total_segments %}
+          <span class="segment-count-badge">{{ total_segments }} segment{{ total_segments|pluralize }}</span>
         {% endif %}
       </div>
 
-      {% if segments %}
+      {% if total_segments %}
         <div class="segment-table" role="table" aria-label="Bilingual aligned text">
           <div class="segment-head" role="columnheader">#</div>
           <div class="segment-head" role="columnheader">Original Text</div>
@@ -103,6 +103,20 @@
             </div>
           {% endfor %}
         </div>
+
+        {% if segments.paginator.num_pages > 1 %}
+          <nav class="segment-pagination" aria-label="Segment pages">
+            <span>Page {{ segments.number }} of {{ segments.paginator.num_pages }} ({{ total_segments }} total segments)</span>
+            <div class="segment-pagination-buttons">
+              {% if segments.has_previous %}
+                <a class="button secondary" href="?page={{ segments.previous_page_number }}">← Previous</a>
+              {% endif %}
+              {% if segments.has_next %}
+                <a class="button secondary" href="?page={{ segments.next_page_number }}">Next →</a>
+              {% endif %}
+            </div>
+          </nav>
+        {% endif %}
       {% else %}
         <div class="empty-state empty-state-inline">
           <div class="empty-state-icon" aria-hidden="true">
@@ -160,30 +174,28 @@
             {% endif %}
           </dd>
         </div>
+        {% if extraction_method == "ocr_image" %}
         <div>
           <dt>OCR Confidence</dt>
           <dd>
-            {% if extraction_method == "ocr_image" %}
-              {% if ocr_confidence_pct is not None %}
-                <span class="{% if ocr_has_low_quality %}text-warning{% endif %}">
-                  {{ ocr_confidence_pct }}%
-                  {% if ocr_has_low_quality %}<span class="badge-warning">⚠ Low</span>{% endif %}
-                </span>
-              {% else %}
-                <span class="text-muted">Not computed</span>
-              {% endif %}
+            {% if ocr_confidence_pct is not None %}
+              <span class="{% if ocr_has_low_quality %}text-warning{% endif %}">
+                {{ ocr_confidence_pct }}%
+                {% if ocr_has_low_quality %}<span class="badge-warning">⚠ Low</span>{% endif %}
+              </span>
             {% else %}
-              <span class="text-muted">N/A</span>
+              <span class="text-muted">Not computed</span>
             {% endif %}
           </dd>
         </div>
+        {% endif %}
         <div>
           <dt>Total Pages</dt>
           <dd>{{ document_pages|length }}</dd>
         </div>
         <div>
           <dt>Total Segments</dt>
-          <dd>{{ segments|length }}</dd>
+          <dd>{{ total_segments }}</dd>
         </div>
         <div>
           <dt>Translation Confidence</dt>
@@ -198,9 +210,9 @@
         <div>
           <dt>Needs Review</dt>
           <dd>
-            {% if segments %}
+            {% if total_segments %}
               <span class="{% if translation_has_review_items %}needs-review{% endif %}">
-                {{ review_segment_count }} of {{ segments|length }}
+                {{ review_segment_count }} of {{ total_segments }}
               </span>
             {% else %}
               <span class="text-muted">No segments</span>
@@ -214,11 +226,6 @@
       </dl>
 
       <div class="complete-actions">
-        {% if can_download %}
-          <a class="button primary full" href="{% url 'translator:job_download' job.id %}">
-            Download Translated PDF
-          </a>
-        {% endif %}
         <a class="button secondary full" href="{% url 'translator:history' %}">← Back to History</a>
       </div>
     </aside>

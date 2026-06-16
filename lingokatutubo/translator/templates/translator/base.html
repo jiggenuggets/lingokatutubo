@@ -75,20 +75,22 @@
     {% endif %}
 
     {% if request.user.is_authenticated and active_translation_job_count %}
-      <aside class="active-job-banner" role="status" aria-live="polite">
-        <div>
-          <strong>{{ active_translation_job_count }} document{% if active_translation_job_count != 1 %}s are{% else %} is{% endif %} currently processing.</strong>
-          {% if active_translation_job %}
-            <span>{{ active_translation_job.original_filename }}</span>
-          {% endif %}
-        </div>
-        <nav aria-label="Active job links">
-          {% if active_translation_job %}
-            <a href="{% url 'translator:job_detail' active_translation_job.id %}">View Status</a>
-          {% endif %}
-          <a href="{% url 'translator:history' %}">History</a>
-        </nav>
-      </aside>
+      {% if not hide_active_job_banner %}
+        <aside class="active-job-banner" role="status" aria-live="polite">
+          <div>
+            <strong>{{ active_translation_job_count }} document{% if active_translation_job_count != 1 %}s are{% else %} is{% endif %} currently processing.</strong>
+            {% if active_translation_job %}
+              <span>{{ active_translation_job.original_filename }}</span>
+            {% endif %}
+          </div>
+          <nav aria-label="Active job links">
+            {% if active_translation_job %}
+              <a href="{% url 'translator:job_detail' active_translation_job.id %}">View Status</a>
+            {% endif %}
+            <a href="{% url 'translator:history' %}">History</a>
+          </nav>
+        </aside>
+      {% endif %}
     {% endif %}
 
     {% block content %}{% endblock %}
