@@ -10,6 +10,11 @@ from .qa_report import (
     DocumentQAReport,
     PageQAResult,
 )
+from .environment import (
+    check_tesseract_environment,
+    assert_tesseract_available,
+    format_environment_report,
+)
 
 __all__ = [
     "OCRService",
@@ -22,4 +27,7 @@ __all__ = [
     "compare_psm_modes",
     "DocumentQAReport",
     "PageQAResult",
+    "check_tesseract_environment",
+    "assert_tesseract_available",
+    "format_environment_report",
 ]

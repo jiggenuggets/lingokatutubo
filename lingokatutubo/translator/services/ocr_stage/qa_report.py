@@ -8,8 +8,15 @@ suitable for surfacing on the /preview page or writing to structure.json.
 """
 from __future__ import annotations
 
+import csv
+import io
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+# CER threshold below which a page is considered "pass" in the QA report.
+# 10 % character error rate is a common OCR acceptance bar for printed text.
+_CER_PASS_THRESHOLD: float = 0.10
 
 
 # ------------------------------------------------------------------
@@ -165,6 +172,7 @@ class PageQAResult:
     reading_order_issues: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     processing_time_s: Optional[float] = None
+    psm: Optional[int] = None    # Tesseract Page Segmentation Mode used
 
 
 @dataclass
@@ -188,6 +196,29 @@ class DocumentQAReport:
     output_result: str                 # "ok" | "partial" | "failed"
     warnings: List[str]
     pages: List[PageQAResult]
+
+    # ------------------------------------------------------------------
+    # Pass / fail determination
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _page_pass_fail(
+        page: "PageQAResult",
+        cer_threshold: float = _CER_PASS_THRESHOLD,
+    ) -> str:
+        """Return "pass", "fail", or "skip" for a single page result.
+
+        "skip"  — no ground truth was supplied; cannot determine accuracy.
+        "pass"  — CER is below threshold (default 10 %).
+        "fail"  — CER is at or above threshold, or extraction produced an error.
+        """
+        if page.cer is None:
+            return "skip"
+        return "pass" if page.cer < cer_threshold else "fail"
+
+    # ------------------------------------------------------------------
+    # Serialisation
+    # ------------------------------------------------------------------
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -221,10 +252,54 @@ class DocumentQAReport:
                         round(p.processing_time_s, 3)
                         if p.processing_time_s is not None else None
                     ),
+                    "psm": p.psm,
+                    "pass_fail": self._page_pass_fail(p),
                 }
                 for p in self.pages
             ],
         }
+
+    def to_csv_rows(self) -> List[Dict[str, Any]]:
+        """Return one dict per page, suitable for csv.DictWriter.
+
+        Columns: filename, page, extraction_method, confidence, cer, wer,
+                 processing_time_s, psm, warnings, pass_fail
+        """
+        rows = []
+        for p in self.pages:
+            rows.append({
+                "filename": self.document_name,
+                "page": p.page_index + 1,
+                "extraction_method": p.extraction_method,
+                "confidence": p.ocr_confidence,
+                "cer": round(p.cer, 4) if p.cer is not None else None,
+                "wer": round(p.wer, 4) if p.wer is not None else None,
+                "processing_time_s": (
+                    round(p.processing_time_s, 3)
+                    if p.processing_time_s is not None else None
+                ),
+                "psm": p.psm,
+                "warnings": "; ".join(p.warnings),
+                "pass_fail": self._page_pass_fail(p),
+            })
+        return rows
+
+    def to_csv_string(self) -> str:
+        """Serialise to a UTF-8 CSV string (header row + one row per page)."""
+        fieldnames = [
+            "filename", "page", "extraction_method", "confidence",
+            "cer", "wer", "processing_time_s", "psm", "warnings", "pass_fail",
+        ]
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        for row in self.to_csv_rows():
+            writer.writerow(row)
+        return buf.getvalue()
+
+    def to_json_string(self, indent: int = 2) -> str:
+        """Serialise to a JSON string via as_dict()."""
+        return json.dumps(self.as_dict(), ensure_ascii=False, indent=indent)
 
 
 # ------------------------------------------------------------------

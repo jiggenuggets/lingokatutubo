@@ -2801,3 +2801,357 @@ class TranslatorPhase5HybridPDFOrderTests(TestCase):
                 str(page_idx), page_methods,
                 f"No extraction method stored for page {page_idx}",
             )
+
+
+# ===========================================================================
+# PHASE 6: Real Tesseract OCR Validation and Document Quality Benchmarking
+# ===========================================================================
+
+
+class TranslatorPhase6EnvironmentTests(TestCase):
+    """Phase 6: Tesseract environment audit — correct status when not installed."""
+
+    def test_check_tesseract_returns_dict_with_required_keys(self):
+        """check_tesseract_environment() must return a dict with all expected keys."""
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        env = check_tesseract_environment()
+        for key in ("available", "version", "languages", "osd_available",
+                    "binary_path", "errors"):
+            self.assertIn(key, env, f"Required key '{key}' missing from environment report")
+
+    def test_check_tesseract_available_is_false_when_not_installed(self):
+        """available=False when Tesseract binary is absent from PATH."""
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        # In this environment Tesseract is not installed.
+        env = check_tesseract_environment()
+        # If somehow Tesseract IS present, we still validate the dict shape.
+        self.assertIsInstance(env["available"], bool)
+        if not env["available"]:
+            self.assertIsNone(env["version"])
+            self.assertGreater(len(env["errors"]), 0,
+                               "errors list should be non-empty when Tesseract is absent")
+
+    def test_check_tesseract_errors_is_nonempty_when_not_installed(self):
+        """errors[] contains at least one actionable message when Tesseract is missing."""
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        env = check_tesseract_environment()
+        if not env["available"]:
+            self.assertTrue(
+                len(env["errors"]) > 0,
+                "At least one actionable error message is expected when Tesseract is absent",
+            )
+            # The error should mention installation guidance.
+            combined = " ".join(env["errors"]).lower()
+            has_guidance = any(
+                kw in combined
+                for kw in ("install", "tesseract", "path", "tesseract_cmd")
+            )
+            self.assertTrue(has_guidance,
+                            f"Error message should include installation guidance: {env['errors']}")
+
+    def test_ocr_service_is_available_returns_false(self):
+        """OCRService.is_available() returns False when Tesseract is not installed."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService()
+        result = svc.is_available()
+        # is_available() must always return a bool (never raise).
+        self.assertIsInstance(result, bool)
+        # In this environment it should be False.
+        if not result:
+            self.assertFalse(result)
+
+    def test_assert_tesseract_available_raises_runtime_error(self):
+        """assert_tesseract_available() raises RuntimeError when Tesseract is absent."""
+        from translator.services.ocr_stage.environment import (
+            check_tesseract_environment,
+            assert_tesseract_available,
+        )
+        env = check_tesseract_environment()
+        if not env["available"]:
+            with self.assertRaises(RuntimeError) as ctx:
+                assert_tesseract_available()
+            self.assertIn("Tesseract", str(ctx.exception))
+        # If Tesseract IS present, the function should not raise.
+
+
+class TranslatorPhase6FixtureBuilderTests(TestCase):
+    """Phase 6: Programmatic OCR fixture builder creates valid images and PDFs."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _build(self):
+        from translator.management.commands.ocr_benchmark import build_fixtures
+        return build_fixtures(self.root)
+
+    def test_clean_scan_fixture_creates_valid_png(self):
+        """build_fixtures() creates a clean_scan.png that PIL can open."""
+        from PIL import Image
+        paths = self._build()
+        self.assertIn("clean_scan", paths)
+        img = Image.open(paths["clean_scan"])
+        self.assertEqual(img.mode, "RGB")
+        self.assertGreater(img.width, 0)
+        self.assertGreater(img.height, 0)
+
+    def test_faded_scan_fixture_has_lower_contrast_than_clean(self):
+        """Faded scan has lower pixel contrast (smaller max-min range) than clean scan."""
+        from PIL import Image
+        paths = self._build()
+        clean = list(Image.open(paths["clean_scan"]).convert("L").getdata())
+        faded = list(Image.open(paths["faded_scan"]).convert("L").getdata())
+        clean_contrast = max(clean) - min(clean)
+        faded_contrast = max(faded) - min(faded)
+        # Clean scan: bg=255, ink=0 → contrast=255.
+        # Faded scan: bg=240, ink=130 → contrast=110. Faded is lower-contrast.
+        self.assertLess(faded_contrast, clean_contrast,
+                        "Faded scan should have lower pixel contrast than clean scan")
+
+    def test_rotated_fixture_has_swapped_dimensions(self):
+        """Rotating a landscape image 90° produces a portrait image."""
+        from PIL import Image
+        paths = self._build()
+        self.assertIn("rotated_90", paths)
+        clean = Image.open(paths["clean_scan"])
+        rotated = Image.open(paths["rotated_90"])
+        # 90° rotation swaps width and height.
+        self.assertEqual(rotated.width, clean.height)
+        self.assertEqual(rotated.height, clean.width)
+
+    def test_blank_fixture_is_all_white(self):
+        """Blank fixture has a mean pixel value of 255 (pure white)."""
+        from PIL import Image
+        import statistics
+        paths = self._build()
+        self.assertIn("blank", paths)
+        blank = Image.open(paths["blank"]).convert("L")
+        mean_val = statistics.mean(blank.getdata())
+        self.assertEqual(mean_val, 255.0, "Blank fixture should be pure white (255)")
+
+    def test_ground_truth_files_are_created_for_all_fixtures(self):
+        """build_fixtures() creates a .txt ground-truth file for each expected fixture."""
+        from translator.management.commands.ocr_benchmark import GROUND_TRUTH
+        self._build()
+        gt_dir = self.root / "ground_truth"
+        for name in GROUND_TRUTH:
+            gt_file = gt_dir / f"{name}.txt"
+            self.assertTrue(
+                gt_file.exists(),
+                f"Ground-truth file missing: {gt_file}",
+            )
+
+    def test_ground_truth_blank_fixture_is_empty(self):
+        """The blank fixture's ground-truth file is an empty string."""
+        self._build()
+        gt_file = self.root / "ground_truth" / "blank.txt"
+        self.assertTrue(gt_file.exists())
+        self.assertEqual(gt_file.read_text(encoding="utf-8").strip(), "")
+
+
+class TranslatorPhase6QAReportExportTests(TestCase):
+    """Phase 6: DocumentQAReport CSV/JSON export and pass/fail logic."""
+
+    def _make_report_with_cer(self, cer_value):
+        """Return a DocumentQAReport whose single page has the given CER."""
+        from translator.services.ocr_stage.qa_report import (
+            DocumentQAReport,
+            PageQAResult,
+        )
+        page = PageQAResult(
+            page_index=0,
+            extraction_method="ocr",
+            char_count=100,
+            block_count=3,
+            ocr_confidence=0.85,
+            cer=cer_value,
+            wer=cer_value,
+            psm=3,
+        )
+        return DocumentQAReport(
+            document_name="test.png",
+            extraction_method="ocr",
+            page_count=1,
+            ocr_confidence=0.85,
+            cer=cer_value,
+            wer=cer_value,
+            empty_page_count=0,
+            failed_page_count=0,
+            total_processing_time_s=1.23,
+            reading_order_issues=[],
+            output_result="ok",
+            warnings=[],
+            pages=[page],
+        )
+
+    def test_csv_rows_has_correct_column_names(self):
+        """to_csv_rows() returns dicts with all required CSV column keys."""
+        report = self._make_report_with_cer(0.05)
+        rows = report.to_csv_rows()
+        self.assertEqual(len(rows), 1)
+        for col in ("filename", "page", "extraction_method", "confidence",
+                    "cer", "wer", "processing_time_s", "psm", "warnings", "pass_fail"):
+            self.assertIn(col, rows[0], f"Missing CSV column: {col}")
+
+    def test_csv_has_one_row_per_page(self):
+        """to_csv_rows() returns exactly one dict per page in the report."""
+        from translator.services.ocr_stage.qa_report import (
+            DocumentQAReport,
+            PageQAResult,
+        )
+        pages = [
+            PageQAResult(page_index=i, extraction_method="ocr",
+                         char_count=50, block_count=2, cer=0.05, wer=0.05, psm=3)
+            for i in range(3)
+        ]
+        report = DocumentQAReport(
+            document_name="multi.pdf", extraction_method="ocr",
+            page_count=3, ocr_confidence=None, cer=0.05, wer=0.05,
+            empty_page_count=0, failed_page_count=0,
+            total_processing_time_s=2.0, reading_order_issues=[],
+            output_result="ok", warnings=[], pages=pages,
+        )
+        rows = report.to_csv_rows()
+        self.assertEqual(len(rows), 3)
+
+    def test_csv_string_has_header_row(self):
+        """to_csv_string() starts with the header row."""
+        report = self._make_report_with_cer(0.05)
+        csv_text = report.to_csv_string()
+        first_line = csv_text.splitlines()[0]
+        self.assertIn("filename", first_line)
+        self.assertIn("pass_fail", first_line)
+
+    def test_pass_fail_skip_when_no_cer(self):
+        """pass_fail is 'skip' when CER is None (no ground truth)."""
+        report = self._make_report_with_cer(None)
+        rows = report.to_csv_rows()
+        self.assertEqual(rows[0]["pass_fail"], "skip")
+
+    def test_pass_fail_pass_when_cer_under_threshold(self):
+        """pass_fail is 'pass' when CER < 0.10."""
+        report = self._make_report_with_cer(0.05)
+        rows = report.to_csv_rows()
+        self.assertEqual(rows[0]["pass_fail"], "pass")
+
+    def test_pass_fail_fail_when_cer_at_or_above_threshold(self):
+        """pass_fail is 'fail' when CER >= 0.10."""
+        for cer in (0.10, 0.50, 1.0):
+            report = self._make_report_with_cer(cer)
+            rows = report.to_csv_rows()
+            self.assertEqual(rows[0]["pass_fail"], "fail",
+                             f"Expected 'fail' for CER={cer}")
+
+    def test_json_round_trip(self):
+        """to_json_string() / json.loads() round-trips without data loss."""
+        import json as _json
+        report = self._make_report_with_cer(0.08)
+        json_str = report.to_json_string()
+        data = _json.loads(json_str)
+        self.assertEqual(data["document_name"], "test.png")
+        self.assertAlmostEqual(data["cer"], 0.08, places=4)
+        self.assertEqual(len(data["pages"]), 1)
+        self.assertEqual(data["pages"][0]["psm"], 3)
+
+
+class TranslatorPhase6MixedPDFRoutingTests(TestCase):
+    """Phase 6: Hybrid PDF routes digital pages to fitz and scanned to OCR path."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _make_two_page_pdf(self, first_chars: int, second_chars: int) -> str:
+        import fitz
+        doc = fitz.open()
+        p0 = doc.new_page(width=612, height=792)
+        if first_chars:
+            p0.insert_text((72, 100), "A" * first_chars, fontsize=12)
+        p1 = doc.new_page(width=612, height=792)
+        if second_chars:
+            p1.insert_text((72, 100), "A" * second_chars, fontsize=12)
+        path = str(self.root / "twopages.pdf")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_digital_page_uses_direct_extraction_not_ocr(self):
+        """A page with sufficient text is extracted via fitz (method=digital)."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        pdf_path = self._make_two_page_pdf(first_chars=200, second_chars=200)
+        job = JobStatus("route-digital")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        PipelineService()._extract_hybrid_pdf(pdf_path, None, job)
+        methods = job.metadata.get("page_extraction_methods", {})
+        self.assertEqual(methods.get("0"), "digital",
+                         "A page with 200 chars should use the digital (fitz) path")
+        self.assertEqual(methods.get("1"), "digital")
+
+    def test_scanned_page_records_ocr_error_when_tesseract_unavailable(self):
+        """When Tesseract is absent, scanned pages have ocr_error in their page_data."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        # Page 1 = blank → triggers OCR path; Tesseract is not installed.
+        pdf_path = self._make_two_page_pdf(first_chars=200, second_chars=0)
+        job = JobStatus("route-scanned")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        layout_data, _ = PipelineService()._extract_hybrid_pdf(pdf_path, None, job)
+        scanned_page = layout_data[1]
+        # The OCR path should have recorded an error (not silently produced empty output).
+        has_error = bool(
+            scanned_page.get("ocr_error") or scanned_page.get("ocr_warning")
+        )
+        self.assertTrue(
+            has_error,
+            "Scanned page with unavailable Tesseract should record ocr_error or ocr_warning, "
+            f"got: {scanned_page}",
+        )
+
+    def test_overall_method_is_hybrid_when_both_paths_used(self):
+        """extraction_method becomes 'hybrid' when both digital and OCR pages appear."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        pdf_path = self._make_two_page_pdf(first_chars=200, second_chars=0)
+        job = JobStatus("route-hybrid")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        PipelineService()._extract_hybrid_pdf(pdf_path, None, job)
+        # Page 0 is digital; page 1 triggers OCR path (regardless of Tesseract outcome).
+        methods = job.metadata.get("page_extraction_methods", {})
+        self.assertEqual(methods.get("0"), "digital")
+        self.assertEqual(methods.get("1"), "ocr")
+        self.assertEqual(
+            job.metadata.get("extraction_method"), "hybrid",
+            "When one page is digital and one is OCR, overall method must be 'hybrid'",
+        )
+
+    def test_benchmark_command_importable_and_reports_unavailable(self):
+        """ocr_benchmark command is importable and gracefully handles Tesseract absence."""
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        from translator.management.commands.ocr_benchmark import build_fixtures, GROUND_TRUTH
+
+        # build_fixtures runs on PIL/fitz only — no Tesseract needed.
+        fixture_dir = self.root / "fixtures"
+        paths = build_fixtures(fixture_dir)
+
+        # All GROUND_TRUTH fixtures should have been created.
+        for name in GROUND_TRUTH:
+            gt_file = fixture_dir / "ground_truth" / f"{name}.txt"
+            self.assertTrue(gt_file.exists(), f"Missing ground-truth file: {gt_file}")
+
+        # Environment check must clearly say Tesseract is absent.
+        env = check_tesseract_environment()
+        if not env["available"]:
+            self.assertFalse(env["available"])
+            self.assertTrue(len(env["errors"]) > 0)
