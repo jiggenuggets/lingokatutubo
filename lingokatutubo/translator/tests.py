@@ -3094,7 +3094,19 @@ class TranslatorPhase6MixedPDFRoutingTests(TestCase):
         self.assertEqual(methods.get("1"), "digital")
 
     def test_scanned_page_records_ocr_error_when_tesseract_unavailable(self):
-        """When Tesseract is absent, scanned pages have ocr_error in their page_data."""
+        """When Tesseract is absent, scanned pages have ocr_error in their page_data.
+
+        Skipped when Tesseract IS installed: a blank scanned page then correctly
+        returns empty blocks with no error, which is the expected happy-path.
+        """
+        import unittest as _ut
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        if check_tesseract_environment()["available"]:
+            raise _ut.SkipTest(
+                "Tesseract is installed — blank scanned page returns empty blocks "
+                "(no ocr_error expected). Phase 7 adds explicit tests for this case."
+            )
+
         from translator.services.pipeline_service import PipelineService, JobStatus
         from translator.services.models import DetectionType
 
@@ -3155,3 +3167,318 @@ class TranslatorPhase6MixedPDFRoutingTests(TestCase):
         if not env["available"]:
             self.assertFalse(env["available"])
             self.assertTrue(len(env["errors"]) > 0)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 7 — Real OCR Benchmark Execution and Evidence-Based Fixes
+# ────────────────────────────────────────────────────────────────────────────
+
+class TranslatorPhase7PreprocessingTests(TestCase):
+    """Unit tests for the Phase 7 preprocessing fixes — no Tesseract required."""
+
+    def _make_gray_image(self, width=200, height=80, bg_gray=240, text_gray=130):
+        """Create a synthetic grayscale image simulating a faded scan."""
+        from PIL import Image, ImageDraw
+        img = Image.new("L", (width, height), bg_gray)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([10, 20, 150, 60], fill=text_gray)
+        return img
+
+    def test_threshold_formula_does_not_blacken_gray_background(self):
+        """Phase 7 fix: threshold must not turn a gray background (240) to black.
+
+        Old formula (mean+255)/2 = 247 for mean=239.6 → bg=240 < 247 → black.
+        New formula mean*0.85 = 203 → bg=240 > 203 → white.
+        """
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False, denoise=False)
+        img = self._make_gray_image(bg_gray=240, text_gray=130)
+        result = svc._preprocess(img)
+        corner_pixel = result.getpixel((0, 0))
+        self.assertEqual(
+            corner_pixel, 255,
+            f"Gray background (240) must become white (255) after threshold, got {corner_pixel}. "
+            "Old formula (mean+255)/2 incorrectly blackens gray backgrounds."
+        )
+
+    def test_threshold_formula_keeps_dark_text_black(self):
+        """Text pixels (130) must remain black after faded-scan thresholding."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False, denoise=False)
+        img = self._make_gray_image(bg_gray=240, text_gray=130)
+        result = svc._preprocess(img)
+        text_pixel = result.getpixel((80, 40))
+        self.assertEqual(
+            text_pixel, 0,
+            f"Dark text pixel (130) must become black (0) after threshold, got {text_pixel}."
+        )
+
+    def test_threshold_not_applied_below_mean_cutoff(self):
+        """Threshold step must be skipped when mean pixel value ≤ 180."""
+        from PIL import Image
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False, denoise=False)
+        # All-dark image: mean ≈ 50 → threshold NOT applied
+        img = Image.new("L", (100, 50), 50)
+        result = svc._preprocess(img)
+        self.assertEqual(result.getpixel((10, 10)), 50,
+                         "No threshold when image mean ≤ 180 — pixel must be unchanged")
+
+    def test_clean_scan_background_stays_white_after_preprocessing(self):
+        """Pure white background (255) must remain white after preprocessing."""
+        from PIL import Image
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService(detect_orientation=False, denoise=False)
+        img = Image.new("RGB", (200, 80), (255, 255, 255))
+        result = svc._preprocess(img)
+        self.assertEqual(result.getpixel((10, 10)), 255,
+                         "White background must remain white after preprocessing")
+
+    def test_ocr_config_includes_dpi_flag(self):
+        """_ocr_image must pass --dpi to Tesseract so low-DPI images are read correctly."""
+        import unittest
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        if not check_tesseract_environment()["available"]:
+            raise unittest.SkipTest("Tesseract not available")
+
+        from PIL import Image
+        from unittest.mock import patch, MagicMock
+        from pytesseract import Output
+        from translator.services.ocr_stage.ocr_service import OCRService
+
+        svc = OCRService(dpi=300, detect_orientation=False, preprocess=False, denoise=False)
+        img = Image.new("RGB", (200, 80), (255, 255, 255))
+        captured_config = {}
+
+        import pytesseract as _pt
+        original_fn = _pt.image_to_data
+
+        def capture_config(image, output_type, lang, config, timeout):
+            captured_config["config"] = config
+            return original_fn(image, output_type=output_type, lang=lang,
+                               config=config, timeout=timeout)
+
+        with patch("pytesseract.image_to_data", side_effect=capture_config):
+            svc._ocr_image(img, 0, 144.0, 57.6, 72.0 / 300.0, lang="eng")
+
+        self.assertIn("--dpi 300", captured_config.get("config", ""),
+                      "Tesseract config must include '--dpi 300' to override missing DPI metadata")
+
+    def test_fixture_images_are_scaled_4x(self):
+        """Phase 7 fixture builder saves 4× scaled images (2400×800) for reliable OCR."""
+        import tempfile
+        from pathlib import Path
+        from PIL import Image
+        from translator.management.commands.ocr_benchmark import build_fixtures
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            paths = build_fixtures(Path(td))
+            with Image.open(paths["clean_scan"]) as img:
+                size = img.size
+            self.assertEqual(size, (2400, 800),
+                             "clean_scan fixture must be 2400×800 (4× scale) for Tesseract legibility")
+
+    def test_fixture_images_have_dpi_metadata(self):
+        """Phase 7 fixture builder embeds 300 DPI in PNG metadata."""
+        import tempfile
+        from pathlib import Path
+        from PIL import Image
+        from translator.management.commands.ocr_benchmark import build_fixtures
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            paths = build_fixtures(Path(td))
+            with Image.open(paths["clean_scan"]) as img:
+                dpi_info = img.info.get("dpi")
+            self.assertIsNotNone(dpi_info, "clean_scan PNG must carry DPI metadata")
+            # PIL stores DPI as float; PNG spec rounds at ~0.4 DPI precision
+            self.assertAlmostEqual(dpi_info[0], 300, delta=1,
+                                   msg=f"DPI must be ≈300, got {dpi_info}")
+
+
+class TranslatorPhase7RealOCRTests(TestCase):
+    """End-to-end OCR regression tests using real Tesseract 5.5.0.
+
+    Every test in this class skips automatically when Tesseract is not available
+    so the suite stays green on CI environments without a Tesseract binary.
+    """
+
+    @classmethod
+    def _skip_if_no_tesseract(cls):
+        import unittest
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        env = check_tesseract_environment()
+        if not env["available"]:
+            raise unittest.SkipTest(
+                f"Tesseract not available: {'; '.join(env['errors'])}"
+            )
+
+    def _fixture_image(self, name):
+        """Return path to a freshly-built benchmark fixture."""
+        import tempfile
+        from pathlib import Path
+        from translator.management.commands.ocr_benchmark import build_fixtures
+        td = tempfile.mkdtemp()
+        self._tmpdir = td
+        return build_fixtures(Path(td))[name]
+
+    def tearDown(self):
+        import shutil
+        td = getattr(self, "_tmpdir", None)
+        if td:
+            shutil.rmtree(td, ignore_errors=True)
+
+    def test_clean_scan_achieves_low_cer_with_real_tesseract(self):
+        """Real OCR on a clean black-on-white fixture achieves CER < 0.10 (Phase 7 fix)."""
+        self._skip_if_no_tesseract()
+        from translator.services.ocr_stage.ocr_service import OCRService
+        from translator.services.ocr_stage.qa_report import calculate_cer
+
+        svc = OCRService(psm=3, lang="eng", detect_orientation=False)
+        path = self._fixture_image("clean_scan")
+        pages = svc.extract_image_text_and_layout(str(path))
+        hyp = " ".join(
+            line.get("text", "")
+            for page in pages
+            for block in page.get("blocks", [])
+            if block.get("type") == "text"
+            for line in block.get("lines", [])
+        ).strip()
+        ref = "Hello world. This is a clean scan document."
+        cer = calculate_cer(ref, hyp)
+        self.assertLess(
+            cer, 0.10,
+            f"clean_scan CER must be < 0.10 after Phase 7 fixes, got {cer:.4f} "
+            f"(hypothesis: {repr(hyp)!r})"
+        )
+
+    def test_faded_scan_achieves_low_cer_after_threshold_fix(self):
+        """Real OCR on a faded scan achieves CER < 0.10 after the Phase 7 threshold fix.
+
+        Before the fix: CER=1.0 (all-black image from (mean+255)/2 formula).
+        After the fix:  CER≈0.028 (background stays white, text stays black).
+        """
+        self._skip_if_no_tesseract()
+        from translator.services.ocr_stage.ocr_service import OCRService
+        from translator.services.ocr_stage.qa_report import calculate_cer
+
+        svc = OCRService(psm=3, lang="eng", detect_orientation=False)
+        path = self._fixture_image("faded_scan")
+        pages = svc.extract_image_text_and_layout(str(path))
+        hyp = " ".join(
+            line.get("text", "")
+            for page in pages
+            for block in page.get("blocks", [])
+            if block.get("type") == "text"
+            for line in block.get("lines", [])
+        ).strip()
+        ref = "Hello world. This is a clean scan document."
+        cer = calculate_cer(ref, hyp)
+        self.assertLess(
+            cer, 0.10,
+            f"faded_scan CER must be < 0.10 after threshold fix, got {cer:.4f} "
+            f"(hypothesis: {repr(hyp)!r})"
+        )
+
+    def test_blank_scanned_page_returns_empty_blocks_not_error(self):
+        """Blank page with Tesseract available returns empty blocks, no ocr_error."""
+        self._skip_if_no_tesseract()
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+        import tempfile, fitz
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "blank.pdf"
+            doc = fitz.open()
+            doc.new_page(width=612, height=792)
+            doc.new_page(width=612, height=792)
+            doc.save(str(p))
+            doc.close()
+
+            job = JobStatus("phase7-blank")
+            job.detection_type = DetectionType.DIGITAL
+            job.metadata = {}
+            layout_data, _ = PipelineService()._extract_hybrid_pdf(
+                str(p), None, job
+            )
+            blank_page = layout_data[1]
+            self.assertNotIn(
+                "ocr_error", blank_page,
+                "Blank page with Tesseract available must not have ocr_error"
+            )
+            self.assertEqual(
+                blank_page.get("blocks", []), [],
+                "Blank page should have no blocks"
+            )
+
+    def test_psm3_mean_cer_better_than_psm4_on_real_fixtures(self):
+        """PSM 3 must match or beat PSM 4 on standard fixtures — default must not change."""
+        self._skip_if_no_tesseract()
+        import tempfile
+        from pathlib import Path
+        from translator.management.commands.ocr_benchmark import (
+            build_fixtures, GROUND_TRUTH, _evaluate_image_fixture,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            paths = build_fixtures(Path(td))
+            image_names = ["clean_scan", "faded_scan", "two_column", "table"]
+            cers = {3: [], 4: []}
+            for name in image_names:
+                if name not in paths:
+                    continue
+                gt = GROUND_TRUTH.get(name, "")
+                if not gt:
+                    continue
+                result = _evaluate_image_fixture(paths[name], gt, "eng", [3, 4])
+                for pr in result["psm_results"]:
+                    if pr.get("cer") is not None:
+                        cers[pr["psm"]].append(pr["cer"])
+
+            mean3 = sum(cers[3]) / len(cers[3]) if cers[3] else 1.0
+            mean4 = sum(cers[4]) / len(cers[4]) if cers[4] else 1.0
+            self.assertLessEqual(
+                mean3, mean4,
+                f"PSM 3 mean CER ({mean3:.4f}) should be ≤ PSM 4 ({mean4:.4f}) "
+                "— default PSM 3 must not be changed."
+            )
+
+    def test_environment_check_available_with_tesseract_cmd(self):
+        """check_tesseract_environment() returns available=True when TESSERACT_CMD is set."""
+        self._skip_if_no_tesseract()
+        from translator.services.ocr_stage.environment import check_tesseract_environment
+        env = check_tesseract_environment()
+        self.assertTrue(env["available"],
+                        "Tesseract must report available=True when binary is reachable")
+        self.assertIn("eng", env["languages"], "English language pack must be installed")
+        self.assertTrue(env["osd_available"], "OSD traineddata must be installed")
+        self.assertFalse(env["errors"], f"No errors expected, got: {env['errors']}")
+
+    def test_mixed_pdf_routes_digital_and_ocr_pages(self):
+        """Phase 7 regression: hybrid PDF extraction routes pages correctly."""
+        self._skip_if_no_tesseract()
+        import tempfile
+        from pathlib import Path
+        from translator.management.commands.ocr_benchmark import build_fixtures
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        with tempfile.TemporaryDirectory() as td:
+            paths = build_fixtures(Path(td))
+            pdf_path = paths.get("mixed_digital_scanned")
+            if not pdf_path:
+                self.skipTest("mixed_digital_scanned fixture not available")
+
+            job = JobStatus("phase7-hybrid")
+            job.detection_type = DetectionType.DIGITAL
+            job.metadata = {}
+            layout_data, _ = PipelineService()._extract_hybrid_pdf(
+                str(pdf_path), None, job
+            )
+            methods = job.metadata.get("page_extraction_methods", {})
+            self.assertEqual(methods.get("0"), "digital",
+                             "Dense digital page must use digital extraction")
+            self.assertEqual(methods.get("1"), "ocr",
+                             "Blank page must use OCR extraction path")
+            self.assertEqual(job.metadata.get("extraction_method"), "hybrid",
+                             "Overall method must be 'hybrid'")

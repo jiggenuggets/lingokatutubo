@@ -313,9 +313,13 @@ class OCRService:
                 pixels = list(img.getdata())
                 mean_px = statistics.mean(pixels)
                 if mean_px > 180:
-                    # Simple global threshold at midpoint between mean and 255.
-                    # This is a lightweight approximation of OTSU for documents.
-                    threshold_value = int((mean_px + 255) / 2)
+                    # Threshold to separate text (dark) from background (light).
+                    # Phase 7 fix: old formula (mean+255)/2 sits above gray
+                    # backgrounds (e.g. 247 threshold for faded bg=240) and
+                    # turns the background black, destroying all OCR output.
+                    # New formula: 85% of the mean stays well below the background
+                    # level while still separating text (typically <150) from bg.
+                    threshold_value = int(mean_px * 0.85)
                     img = img.point(lambda px: 255 if px > threshold_value else 0)
                     print(f"[OCR] Applied threshold (mean={mean_px:.1f}, cutoff={threshold_value})")
             except Exception as e:
@@ -520,7 +524,10 @@ class OCRService:
         if rot_warning:
             warnings.append(rot_warning)
 
-        psm_config = f"--psm {self.psm}"
+        # Pass --dpi so Tesseract interprets the image at the correct resolution.
+        # Without this, images lacking DPI metadata fall back to 70 DPI, which
+        # makes text appear smaller than it is and degrades recognition accuracy.
+        psm_config = f"--psm {self.psm} --dpi {self.dpi}"
         try:
             data = pytesseract.image_to_data(
                 img,

@@ -50,8 +50,15 @@ def build_fixtures(fixture_dir: Path) -> Dict[str, Path]:
 
     Returns a dict mapping fixture_name → Path.
     All images are generated with PIL so no external fonts are needed.
+
+    Phase 7: images are now saved at 300 DPI with 4× scale (2400×800 px)
+    so Tesseract sees text at ~44 px / 11 pt — legible without a TrueType
+    font. DPI metadata is embedded so Tesseract does not fall back to 70 DPI.
     """
     from PIL import Image, ImageDraw
+
+    _FIXTURE_DPI = 300
+    _SCALE = 4  # 4× the original 600×200 → 2400×800
 
     image_dir = fixture_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -62,25 +69,32 @@ def build_fixtures(fixture_dir: Path) -> Dict[str, Path]:
 
     def _text_image(
         text: str,
-        size=(600, 200),
         bg=(255, 255, 255),
         fg=(0, 0, 0),
     ) -> Image.Image:
-        img = Image.new("RGB", size, bg)
-        draw = ImageDraw.Draw(img)
+        # Draw at 1× then scale up — avoids needing TrueType fonts while
+        # producing large-enough characters for reliable Tesseract recognition.
+        small = Image.new("RGB", (600, 200), bg)
+        draw = ImageDraw.Draw(small)
         draw.text((30, 80), text, fill=fg)
-        return img
+        return small.resize(
+            (small.width * _SCALE, small.height * _SCALE),
+            Image.NEAREST,
+        )
+
+    def _save(img: "Image.Image", path: Path) -> None:
+        img.save(str(path), dpi=(_FIXTURE_DPI, _FIXTURE_DPI))
 
     base_text = GROUND_TRUTH["clean_scan"]
 
     # clean_scan
     p = image_dir / "clean_scan.png"
-    _text_image(base_text).save(str(p))
+    _save(_text_image(base_text), p)
     paths["clean_scan"] = p
 
     # faded_scan — light grey background, medium grey ink
     p = image_dir / "faded_scan.png"
-    _text_image(base_text, bg=(240, 240, 240), fg=(130, 130, 130)).save(str(p))
+    _save(_text_image(base_text, bg=(240, 240, 240), fg=(130, 130, 130)), p)
     paths["faded_scan"] = p
 
     # rotated variants
@@ -92,31 +106,31 @@ def build_fixtures(fixture_dir: Path) -> Dict[str, Path]:
         (270, _PIL_Image.ROTATE_270, "rotated_270"),
     ):
         p = image_dir / f"{key}.png"
-        base_img.transpose(transpose_op).save(str(p))
+        _save(base_img.transpose(transpose_op), p)
         paths[key] = p
 
     # two_column — two text blocks side by side
     p = image_dir / "two_column.png"
-    img = Image.new("RGB", (600, 200), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
+    small = Image.new("RGB", (600, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(small)
     draw.text((30, 80),  "Left column text.",  fill=(0, 0, 0))
     draw.text((330, 80), "Right column text.", fill=(0, 0, 0))
-    img.save(str(p))
+    _save(small.resize((small.width * _SCALE, small.height * _SCALE), Image.NEAREST), p)
     paths["two_column"] = p
 
     # table — simple grid-like layout
     p = image_dir / "table.png"
-    img = Image.new("RGB", (600, 200), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
+    small = Image.new("RGB", (600, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(small)
     draw.text((30, 40), "Name  Age  City",   fill=(0, 0, 0))
     draw.text((30, 80), "Alice  30   Manila", fill=(0, 0, 0))
     draw.text((30, 110), "Bob    25   Davao",  fill=(0, 0, 0))
-    img.save(str(p))
+    _save(small.resize((small.width * _SCALE, small.height * _SCALE), Image.NEAREST), p)
     paths["table"] = p
 
     # blank — solid white
     p = image_dir / "blank.png"
-    Image.new("RGB", (600, 200), (255, 255, 255)).save(str(p))
+    _save(Image.new("RGB", (2400, 800), (255, 255, 255)), p)
     paths["blank"] = p
 
     # mixed digital/scanned PDF — page 0 has digital text, page 1 is blank
