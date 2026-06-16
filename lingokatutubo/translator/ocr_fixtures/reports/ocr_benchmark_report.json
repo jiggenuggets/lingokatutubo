@@ -1,0 +1,301 @@
+{
+  "tesseract_version": "5.4.0.20240606",
+  "languages": [
+    "eng",
+    "osd"
+  ],
+  "psm_modes_tested": [
+    3,
+    4,
+    6
+  ],
+  "lang": "eng",
+  "fixtures": [
+    {
+      "filename": "blank.png",
+      "ground_truth": "",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "",
+          "cer": null,
+          "wer": null,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.39
+        },
+        {
+          "psm": 4,
+          "hypothesis": "",
+          "cer": null,
+          "wer": null,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.391
+        },
+        {
+          "psm": 6,
+          "hypothesis": "",
+          "cer": null,
+          "wer": null,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.375
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "clean_scan.png",
+      "ground_truth": "Hello world. This is a clean scan document.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "ewe ewe cne ame once",
+          "cer": 0.7778,
+          "wer": 1.0,
+          "confidence": 0.094,
+          "warnings": [],
+          "processing_time_s": 0.375
+        },
+        {
+          "psm": 4,
+          "hypothesis": "ewe ewe cne ame once",
+          "cer": 0.7778,
+          "wer": 1.0,
+          "confidence": 0.094,
+          "warnings": [],
+          "processing_time_s": 0.344
+        },
+        {
+          "psm": 6,
+          "hypothesis": "oy ewe Me nec an eanene",
+          "cer": 0.7778,
+          "wer": 1.0,
+          "confidence": 0.18,
+          "warnings": [],
+          "processing_time_s": 0.437
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "faded_scan.png",
+      "ground_truth": "Hello world. This is a clean scan document.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.344
+        },
+        {
+          "psm": 4,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.344
+        },
+        {
+          "psm": 6,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.375
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "rotated_180.png",
+      "ground_truth": "Hello world. This is a clean scan document.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "[eters en nee Bae",
+          "cer": 0.8056,
+          "wer": 1.0,
+          "confidence": 0.08,
+          "warnings": [],
+          "processing_time_s": 0.39
+        },
+        {
+          "psm": 4,
+          "hypothesis": "[eters en nee Bae",
+          "cer": 0.8056,
+          "wer": 1.0,
+          "confidence": 0.08,
+          "warnings": [],
+          "processing_time_s": 0.375
+        },
+        {
+          "psm": 6,
+          "hypothesis": "[eterna en enn Hae oe",
+          "cer": 0.7778,
+          "wer": 1.0,
+          "confidence": 0.078,
+          "warnings": [],
+          "processing_time_s": 0.391
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "rotated_270.png",
+      "ground_truth": "Hello world. This is a clean scan document.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "ee cun- an emnene",
+          "cer": 0.8056,
+          "wer": 1.0,
+          "confidence": 0.16,
+          "warnings": [],
+          "processing_time_s": 0.469
+        },
+        {
+          "psm": 4,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.375
+        },
+        {
+          "psm": 6,
+          "hypothesis": "i",
+          "cer": 0.9722,
+          "wer": 1.0,
+          "confidence": 0.95,
+          "warnings": [],
+          "processing_time_s": 0.375
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "rotated_90.png",
+      "ground_truth": "Hello world. This is a clean scan document.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "jeeerme em eee",
+          "cer": 0.8611,
+          "wer": 1.0,
+          "confidence": 0.2,
+          "warnings": [],
+          "processing_time_s": 0.453
+        },
+        {
+          "psm": 4,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.375
+        },
+        {
+          "psm": 6,
+          "hypothesis": ": i i i",
+          "cer": 0.9444,
+          "wer": 1.0,
+          "confidence": 0.59,
+          "warnings": [],
+          "processing_time_s": 0.375
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "table.png",
+      "ground_truth": "Name Age City. Alice 30 Manila. Bob 25 Davao.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "sare tee Cy ay aN ee",
+          "cer": 0.8108,
+          "wer": 1.0,
+          "confidence": 0.3961,
+          "warnings": [],
+          "processing_time_s": 0.422
+        },
+        {
+          "psm": 4,
+          "hypothesis": "sare tee Cy ay aN ee",
+          "cer": 0.8108,
+          "wer": 1.0,
+          "confidence": 0.3961,
+          "warnings": [],
+          "processing_time_s": 0.39
+        },
+        {
+          "psm": 6,
+          "hypothesis": "sare te Cy ay aN ee",
+          "cer": 0.8108,
+          "wer": 1.0,
+          "confidence": 0.3683,
+          "warnings": [],
+          "processing_time_s": 0.406
+        }
+      ],
+      "errors": []
+    },
+    {
+      "filename": "two_column.png",
+      "ground_truth": "Left column text. Right column text.",
+      "psm_results": [
+        {
+          "psm": 3,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.422
+        },
+        {
+          "psm": 4,
+          "hypothesis": "",
+          "cer": 1.0,
+          "wer": 1.0,
+          "confidence": null,
+          "warnings": [],
+          "processing_time_s": 0.391
+        },
+        {
+          "psm": 6,
+          "hypothesis": "atmo ee Aerie wet",
+          "cer": 0.8065,
+          "wer": 1.0,
+          "confidence": 0.2125,
+          "warnings": [],
+          "processing_time_s": 0.391
+        }
+      ],
+      "errors": []
+    }
+  ],
+  "mixed_pdf": {
+    "filename": "mixed_digital_scanned.pdf",
+    "page_count": 2,
+    "extraction_method": "hybrid",
+    "page_extraction_methods": {
+      "0": "digital",
+      "1": "ocr"
+    },
+    "ocr_unavailable": null,
+    "page_order": [
+      0,
+      1
+    ]
+  }
+}
