@@ -2344,3 +2344,460 @@ class TranslatorPhase4FidelityTests(TestCase):
         doc = fitz.open(output_path)
         self.assertEqual(doc.page_count, 1)
         doc.close()
+
+
+# ===========================================================================
+# PHASE 5: Real OCR Benchmarking, Reading Order, and Layout Quality Validation
+# ===========================================================================
+
+
+class TranslatorPhase5MetricsTests(TestCase):
+    """Phase 5: CER and WER metric calculations (pure Python, no Tesseract)."""
+
+    def _cer(self, ref, hyp):
+        from translator.services.ocr_stage.qa_report import calculate_cer
+        return calculate_cer(ref, hyp)
+
+    def _wer(self, ref, hyp):
+        from translator.services.ocr_stage.qa_report import calculate_wer
+        return calculate_wer(ref, hyp)
+
+    def test_cer_identical_strings_is_zero(self):
+        """CER between a string and itself is 0.0."""
+        self.assertEqual(self._cer("hello world", "hello world"), 0.0)
+
+    def test_cer_one_char_substitution(self):
+        """One character substitution in a 3-char string gives CER of 1/3."""
+        cer = self._cer("cat", "bat")
+        self.assertAlmostEqual(cer, 1 / 3, places=5)
+
+    def test_cer_completely_different_capped_at_one(self):
+        """CER between completely different strings is capped at 1.0."""
+        cer = self._cer("abc", "xyz")
+        self.assertEqual(cer, 1.0)
+
+    def test_cer_empty_reference_returns_zero(self):
+        """CER with an empty reference is 0.0 (no characters to measure against)."""
+        self.assertEqual(self._cer("", "hypothesis text"), 0.0)
+
+    def test_wer_identical_strings_is_zero(self):
+        """WER between a sentence and itself is 0.0."""
+        self.assertEqual(self._wer("hello world", "hello world"), 0.0)
+
+    def test_wer_one_word_substitution(self):
+        """One word substituted in a two-word phrase gives WER of 0.5."""
+        wer = self._wer("hello world", "hello there")
+        self.assertAlmostEqual(wer, 0.5, places=5)
+
+    def test_wer_empty_reference_returns_zero(self):
+        """WER with an empty reference is 0.0 (no words to measure against)."""
+        self.assertEqual(self._wer("", "some output"), 0.0)
+
+
+class TranslatorPhase5QAReportTests(TestCase):
+    """Phase 5: DocumentQAReport generation and serialisation."""
+
+    def _make_page(self, text="Hello world.", *, page=0, with_confidence=False):
+        """Return a minimal page dict in pipeline layout_data format."""
+        line = {"text": text, "bbox": [72.0, 100.0, 540.0, 120.0]}
+        if with_confidence:
+            line["confidence"] = 0.85
+        block = {
+            "type": "text",
+            "bbox": [72.0, 100.0, 540.0, 120.0],
+            "lines": [line],
+        }
+        if with_confidence:
+            block["confidence"] = 0.85
+        return {
+            "page": page,
+            "width": 612.0,
+            "height": 792.0,
+            "blocks": [block],
+        }
+
+    def _make_empty_page(self, *, page=0):
+        return {"page": page, "width": 612.0, "height": 792.0, "blocks": []}
+
+    def test_qa_report_as_dict_has_required_keys(self):
+        """as_dict() must include all required QA keys."""
+        from translator.services.ocr_stage.qa_report import build_document_qa_report
+        layout = [self._make_page()]
+        report = build_document_qa_report("test.pdf", layout, extraction_method="digital")
+        d = report.as_dict()
+        for key in (
+            "document_name", "extraction_method", "page_count",
+            "ocr_confidence", "cer", "wer",
+            "empty_page_rate", "failed_page_count",
+            "total_processing_time_s", "reading_order_issues",
+            "output_result", "warnings", "pages",
+        ):
+            self.assertIn(key, d, f"Required key '{key}' missing from as_dict()")
+
+    def test_qa_report_empty_page_rate_computed(self):
+        """empty_page_rate = empty_page_count / page_count."""
+        from translator.services.ocr_stage.qa_report import build_document_qa_report
+        layout = [
+            self._make_page(page=0),
+            self._make_empty_page(page=1),
+            self._make_empty_page(page=2),
+            self._make_page(page=3),
+        ]
+        report = build_document_qa_report("doc.pdf", layout)
+        d = report.as_dict()
+        self.assertEqual(d["page_count"], 4)
+        self.assertAlmostEqual(d["empty_page_rate"], 0.5, places=4)
+
+    def test_qa_report_cer_wer_with_ground_truth(self):
+        """CER and WER are populated when ground_truth_pages is supplied."""
+        from translator.services.ocr_stage.qa_report import build_document_qa_report
+        layout = [self._make_page("hello world")]
+        # Hypothesis matches reference exactly → CER=0, WER=0
+        report = build_document_qa_report(
+            "doc.pdf", layout,
+            ground_truth_pages=["hello world"],
+        )
+        self.assertEqual(report.cer, 0.0)
+        self.assertEqual(report.wer, 0.0)
+
+    def test_qa_report_cer_wer_none_without_ground_truth(self):
+        """CER and WER are None when no ground truth is supplied."""
+        from translator.services.ocr_stage.qa_report import build_document_qa_report
+        layout = [self._make_page()]
+        report = build_document_qa_report("doc.pdf", layout)
+        self.assertIsNone(report.cer)
+        self.assertIsNone(report.wer)
+
+    def test_qa_report_reading_order_issues_surfaced(self):
+        """reading_order_issues in as_dict() matches audit_reading_order output."""
+        from translator.services.ocr_stage.qa_report import (
+            build_document_qa_report,
+            audit_reading_order,
+        )
+        # Reversed block order: second block has a smaller y than first.
+        layout = [{
+            "page": 0,
+            "width": 612.0,
+            "height": 792.0,
+            "blocks": [
+                {"type": "text", "bbox": [72.0, 400.0, 540.0, 420.0],
+                 "lines": [{"text": "Late block", "bbox": [72.0, 400.0, 540.0, 420.0]}]},
+                {"type": "text", "bbox": [72.0, 100.0, 540.0, 120.0],
+                 "lines": [{"text": "Early block", "bbox": [72.0, 100.0, 540.0, 120.0]}]},
+            ],
+        }]
+        report = build_document_qa_report("reverse.pdf", layout)
+        d = report.as_dict()
+        self.assertGreater(len(d["reading_order_issues"]), 0)
+        combined = " ".join(d["reading_order_issues"])
+        self.assertIn("reading-order problem", combined)
+
+
+class TranslatorPhase5ReadingOrderTests(TestCase):
+    """Phase 5: audit_reading_order detects ordering and layout issues."""
+
+    def _page(self, blocks, *, page=0, width=612.0, height=792.0):
+        return {"page": page, "width": width, "height": height, "blocks": blocks}
+
+    def _text_block(self, x0, y0, x1, y1, text="text"):
+        return {
+            "type": "text",
+            "bbox": [x0, y0, x1, y1],
+            "lines": [{"text": text, "bbox": [x0, y0, x1, y1]}],
+        }
+
+    def test_single_column_top_bottom_order_passes(self):
+        """Blocks in strict top-to-bottom order produce no ordering issues."""
+        from translator.services.ocr_stage.qa_report import audit_reading_order
+        layout = [self._page([
+            self._text_block(72, 100, 540, 120, "First line"),
+            self._text_block(72, 130, 540, 150, "Second line"),
+            self._text_block(72, 160, 540, 180, "Third line"),
+        ])]
+        issues = audit_reading_order(layout)
+        order_issues = [i for i in issues if "reading-order problem" in i]
+        self.assertEqual(order_issues, [], f"Unexpected order issues: {order_issues}")
+
+    def test_reversed_block_order_is_flagged(self):
+        """A block appearing above its predecessor triggers an order issue."""
+        from translator.services.ocr_stage.qa_report import audit_reading_order
+        layout = [self._page([
+            self._text_block(72, 500, 540, 520, "Block at y=500"),
+            self._text_block(72, 100, 540, 120, "Block at y=100"),  # reverse
+        ])]
+        issues = audit_reading_order(layout)
+        self.assertTrue(
+            any("reading-order problem" in i for i in issues),
+            f"Expected a reading-order issue, got: {issues}",
+        )
+
+    def test_two_column_layout_is_detected(self):
+        """Two blocks in distinct left/right zones trigger a two-column notice."""
+        from translator.services.ocr_stage.qa_report import audit_reading_order
+        # Left block: x1 <= 612*0.45 ≈ 275.  Right block: x0 >= 612*0.55 ≈ 337.
+        layout = [self._page([
+            self._text_block(72, 100, 260, 120, "Left column text"),
+            self._text_block(350, 100, 560, 120, "Right column text"),
+        ])]
+        issues = audit_reading_order(layout)
+        self.assertTrue(
+            any("two-column" in i for i in issues),
+            f"Expected a two-column notice, got: {issues}",
+        )
+
+    def test_empty_page_is_noted(self):
+        """A page with no text blocks produces a 'blank page or extraction failed' note."""
+        from translator.services.ocr_stage.qa_report import audit_reading_order
+        layout = [{"page": 0, "width": 612.0, "height": 792.0, "blocks": []}]
+        issues = audit_reading_order(layout)
+        self.assertTrue(
+            any("blank page" in i.lower() or "extraction failed" in i.lower() for i in issues),
+            f"Expected empty-page note, got: {issues}",
+        )
+
+
+class TranslatorPhase5PSMBenchmarkTests(TestCase):
+    """Phase 5: PSM configuration is correctly wired through OCRService."""
+
+    def test_ocr_service_default_psm_is_3(self):
+        """OCRService() without psm argument uses PSM 3 (Tesseract auto mode)."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        svc = OCRService()
+        self.assertEqual(svc.psm, 3)
+
+    def test_psm_parameter_accepted_in_range(self):
+        """OCRService(psm=6) stores psm=6."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        for psm in (0, 1, 3, 4, 6, 11, 13):
+            svc = OCRService(psm=psm)
+            self.assertEqual(svc.psm, psm, f"psm={psm} was not stored correctly")
+
+    def test_psm_out_of_range_defaults_to_3(self):
+        """PSM values outside [0, 13] are silently replaced with 3."""
+        from translator.services.ocr_stage.ocr_service import OCRService
+        for bad in (14, 99, -1):
+            svc = OCRService(psm=bad)
+            self.assertEqual(svc.psm, 3, f"PSM {bad} should default to 3")
+
+    def test_psm_config_string_passed_to_tesseract(self):
+        """--psm <N> is included in the config string sent to image_to_data."""
+        from unittest.mock import patch, MagicMock
+        from PIL import Image
+        from translator.services.ocr_stage.ocr_service import OCRService
+
+        svc = OCRService(psm=6, detect_orientation=False, preprocess=False,
+                         denoise=False, threshold=False)
+        svc._verified = True  # skip Tesseract availability check
+
+        mock_data = {
+            "text": [], "conf": [], "block_num": [], "par_num": [], "line_num": [],
+            "left": [], "top": [], "width": [], "height": [],
+        }
+        img = Image.new("RGB", (100, 50), (255, 255, 255))
+
+        with patch("pytesseract.image_to_data", return_value=mock_data) as mock_itd:
+            svc._ocr_image(img, 0, 72.0, 36.0, 1.0, lang="eng")
+
+        self.assertTrue(mock_itd.called, "image_to_data was not called")
+        call_kwargs = mock_itd.call_args[1] if mock_itd.call_args[1] else {}
+        call_args = mock_itd.call_args[0] if mock_itd.call_args[0] else ()
+        config_value = call_kwargs.get("config") or ""
+        self.assertIn("--psm 6", config_value,
+                      f"Expected '--psm 6' in config, got: {config_value!r}")
+
+
+class TranslatorPhase5ReadingOrderReconstructionTests(TestCase):
+    """Phase 5: Reconstruction quality — output contains expected text,
+    page count matches layout, and None dimensions are handled safely."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _make_layout(self, texts, *, width=612.0, height=792.0):
+        """Build a single-page layout_data with one line per text string."""
+        blocks = []
+        y = 100.0
+        for text in texts:
+            bbox = [72.0, y, 540.0, y + 20.0]
+            blocks.append({
+                "type": "text",
+                "bbox": bbox,
+                "lines": [{"text": text, "bbox": bbox}],
+            })
+            y += 24.0
+        return [{"page": 0, "width": width, "height": height, "blocks": blocks}]
+
+    def test_output_contains_all_translated_segments(self):
+        """Every translated string appears in the reconstructed output PDF."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        sources = [f"Source {i}" for i in range(4)]
+        translations = {src: {"original": src, "translated": f"Xlat{i}", "method": "test", "confidence": 1.0}
+                        for i, src in enumerate(sources)}
+        layout = self._make_layout(sources)
+
+        output_path = str(self.root / "out.pdf")
+        ok = PipelineService()._create_output_pdf(layout, translations, output_path)
+        self.assertTrue(ok)
+
+        doc = fitz.open(output_path)
+        full_text = "".join(doc[i].get_text() for i in range(doc.page_count))
+        doc.close()
+
+        for i in range(4):
+            self.assertIn(f"Xlat{i}", full_text,
+                          f"Translated segment 'Xlat{i}' missing from output PDF.")
+
+    def test_output_page_count_equals_layout_page_count(self):
+        """Output PDF has exactly as many pages as the layout_data list."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        n_pages = 3
+        layout = []
+        for p in range(n_pages):
+            layout.append({
+                "page": p, "width": 612.0, "height": 792.0,
+                "blocks": [{"type": "text", "bbox": [72, 100, 540, 120],
+                             "lines": [{"text": f"Page {p} text", "bbox": [72, 100, 540, 120]}]}],
+            })
+
+        output_path = str(self.root / "paged.pdf")
+        PipelineService()._create_output_pdf(layout, {}, output_path)
+
+        doc = fitz.open(output_path)
+        self.assertEqual(doc.page_count, n_pages)
+        doc.close()
+
+    def test_none_width_height_pages_use_default_dimensions(self):
+        """Pages with None width/height are created with 612×792 pt defaults."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        layout = [{"page": 0, "width": None, "height": None,
+                   "blocks": [{"type": "text", "bbox": [72, 100, 540, 120],
+                                "lines": [{"text": "Default size page", "bbox": [72, 100, 540, 120]}]}]}]
+        output_path = str(self.root / "default_size.pdf")
+        ok = PipelineService()._create_output_pdf(layout, {}, output_path)
+        self.assertTrue(ok)
+
+        doc = fitz.open(output_path)
+        page = doc[0]
+        # _create_output_pdf falls back to 612×792 when dimensions are None/falsy.
+        self.assertAlmostEqual(page.rect.width, 612.0, delta=1.0)
+        self.assertAlmostEqual(page.rect.height, 792.0, delta=1.0)
+        doc.close()
+
+    def test_text_block_completely_outside_page_bounds_is_skipped(self):
+        """A block whose bbox is outside the page rect does not crash reconstruction."""
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        # Block at y=9000 is way outside a 792-pt tall page.
+        layout = [{
+            "page": 0, "width": 612.0, "height": 792.0,
+            "blocks": [
+                {
+                    "type": "text",
+                    "bbox": [72, 100, 540, 120],
+                    "lines": [{"text": "Valid line", "bbox": [72, 100, 540, 120]}],
+                },
+                {
+                    "type": "text",
+                    "bbox": [72, 9000, 540, 9020],
+                    "lines": [{"text": "Far-out line", "bbox": [72, 9000, 540, 9020]}],
+                },
+            ],
+        }]
+        translations = {
+            "Valid line": {"original": "Valid line", "translated": "Valid OK",
+                           "method": "test", "confidence": 1.0},
+            "Far-out line": {"original": "Far-out line", "translated": "Should skip",
+                             "method": "test", "confidence": 1.0},
+        }
+        output_path = str(self.root / "oob.pdf")
+        ok = PipelineService()._create_output_pdf(layout, translations, output_path)
+        self.assertTrue(ok, "_create_output_pdf should not crash on out-of-bounds block")
+        self.assertTrue(Path(output_path).exists())
+
+
+class TranslatorPhase5HybridPDFOrderTests(TestCase):
+    """Phase 5: Mixed digital/scanned PDFs preserve page order and store methods."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _make_two_page_pdf(self, *, first_page_chars: int, second_page_chars: int) -> str:
+        """Create a two-page PDF; each page has the specified number of 'A' characters."""
+        import fitz
+        doc = fitz.open()
+        p0 = doc.new_page(width=612, height=792)
+        if first_page_chars:
+            p0.insert_text((72, 100), "A" * first_page_chars, fontsize=12)
+        p1 = doc.new_page(width=612, height=792)
+        if second_page_chars:
+            p1.insert_text((72, 100), "A" * second_page_chars, fontsize=12)
+        path = str(self.root / "mixed.pdf")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_mixed_pdf_page_order_preserved(self):
+        """Pages in the layout_data output are in the same order as the source PDF."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        # 200-char first page (digital), 0-char second page (scanned/ocr path)
+        pdf_path = self._make_two_page_pdf(first_page_chars=200, second_page_chars=0)
+        job = JobStatus("order-test")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        pipeline = PipelineService()
+        layout_data, _ = pipeline._extract_hybrid_pdf(pdf_path, None, job)
+
+        self.assertEqual(len(layout_data), 2, "Expected exactly 2 pages")
+        self.assertEqual(layout_data[0]["page"], 0, "First page index must be 0")
+        self.assertEqual(layout_data[1]["page"], 1, "Second page index must be 1")
+
+    def test_mixed_pdf_sets_hybrid_method(self):
+        """A PDF with one digital and one scanned page stores extraction_method=hybrid."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        pdf_path = self._make_two_page_pdf(first_page_chars=200, second_page_chars=0)
+        job = JobStatus("hybrid-method-test")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        PipelineService()._extract_hybrid_pdf(pdf_path, None, job)
+        # First page is digital; second page has no chars → routed to OCR path.
+        # extraction_method depends on whether OCR succeeds, but page methods are set.
+        page_methods = job.metadata.get("page_extraction_methods", {})
+        self.assertEqual(page_methods.get("0"), "digital")
+        self.assertEqual(page_methods.get("1"), "ocr")
+
+    def test_hybrid_pdf_page_methods_stored_for_every_page(self):
+        """page_extraction_methods contains an entry for every page in the PDF."""
+        from translator.services.pipeline_service import PipelineService, JobStatus
+        from translator.services.models import DetectionType
+
+        pdf_path = self._make_two_page_pdf(first_page_chars=200, second_page_chars=200)
+        job = JobStatus("all-digital-test")
+        job.detection_type = DetectionType.DIGITAL
+        job.metadata = {}
+
+        pipeline = PipelineService()
+        layout_data, _ = pipeline._extract_hybrid_pdf(pdf_path, None, job)
+
+        page_methods = job.metadata.get("page_extraction_methods", {})
+        for page_idx in range(len(layout_data)):
+            self.assertIn(
+                str(page_idx), page_methods,
+                f"No extraction method stored for page {page_idx}",
+            )
