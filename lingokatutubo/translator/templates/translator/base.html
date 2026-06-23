@@ -18,7 +18,11 @@
     <header class="site-header">
       <nav class="site-nav" aria-label="Primary">
         <a class="brand" href="{% url 'translator:home' %}">
-          <span class="brand-mark" aria-hidden="true">LK</span>
+          <img
+            class="brand-mark"
+            src="{% static 'images/lingokatutubo-logo.png' %}"
+            alt="LINGOKATUTUBO logo"
+          >
           <span class="brand-text">
             <strong>LingoKatutubo</strong>
             <small>Bagobo-Tagabawa</small>
@@ -37,28 +41,29 @@
         </button>
 
         <div class="nav-links" id="nav-links" role="menubar">
-          <a href="{% url 'translator:home' %}" role="menuitem">Home</a>
-          <a href="{% url 'translator:translate' %}" role="menuitem">Translate</a>
-          {% if request.user.is_authenticated %}
-            <a href="{% url 'translator:history' %}" role="menuitem">History</a>
-          {% endif %}
-          <a href="{% url 'translator:about' %}" role="menuitem">About</a>
-          {% if request.user.is_staff %}
-            <a href="{% url 'translator:health' %}" role="menuitem">Health</a>
-            <a href="/admin/" role="menuitem">Admin</a>
-          {% endif %}
-          {% if request.user.is_authenticated %}
-            <span class="nav-user" aria-label="Signed in as {{ request.user.username }}">
-              {{ request.user.username }}
-            </span>
-            <form class="logout-form" method="post" action="{% url 'translator:logout' %}">
-              {% csrf_token %}
-              <button type="submit">Log Out</button>
-            </form>
-          {% else %}
-            <a href="{% url 'translator:login' %}" role="menuitem">Log In</a>
-            <a class="nav-cta" href="{% url 'translator:signup' %}" role="menuitem">Sign Up</a>
-          {% endif %}
+          {% block nav_links %}
+            <a href="{% url 'translator:home' %}" role="menuitem">Home</a>
+            <a href="{% url 'translator:translate' %}" role="menuitem">Translate</a>
+            {% if request.user.is_authenticated %}
+              <a href="{% url 'translator:history' %}" role="menuitem">History</a>
+            {% endif %}
+            {% if request.user.is_staff %}
+              <a href="{% url 'translator:health' %}" role="menuitem">Health</a>
+              <a href="/admin/" role="menuitem">Admin</a>
+            {% endif %}
+            {% if request.user.is_authenticated %}
+              <span class="nav-user" aria-label="Signed in as {{ request.user.username }}">
+                {{ request.user.username }}
+              </span>
+              <form class="logout-form" method="post" action="{% url 'translator:logout' %}">
+                {% csrf_token %}
+                <button class="nav-cta button secondary" type="submit">Log Out</button>
+              </form>
+            {% else %}
+              <a href="{% url 'translator:login' %}" role="menuitem">Log In</a>
+              <a class="nav-cta button secondary" href="{% url 'translator:signup' %}" role="menuitem">Sign Up</a>
+            {% endif %}
+          {% endblock %}
         </div>
       </nav>
     </header>
@@ -93,7 +98,19 @@
       {% endif %}
     {% endif %}
 
+    <div id="js-error-banner" class="message error js-toast" role="alert" aria-live="assertive" hidden>
+      <span id="js-error-banner-text"></span>
+      <button class="message-dismiss" type="button" aria-label="Dismiss notification">&#x2715;</button>
+    </div>
+
     {% block content %}{% endblock %}
+
+    <div id="page-transition-overlay" class="page-transition-overlay" aria-hidden="true">
+      <div class="page-transition-spinner" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <p id="page-transition-text">Opening Bilingual Preview&hellip;</p>
+      </div>
+    </div>
 
     <footer class="site-footer">
       <div class="footer-inner">
@@ -101,14 +118,6 @@
           <strong>LingoKatutubo</strong>
           <p>Document translation and bilingual review for Bagobo-Tagabawa language preservation.</p>
         </div>
-        <nav aria-label="Footer navigation">
-          <a href="{% url 'translator:home' %}">Home</a>
-          <a href="{% url 'translator:translate' %}">Translate</a>
-          {% if request.user.is_authenticated %}
-            <a href="{% url 'translator:history' %}">History</a>
-          {% endif %}
-          <a href="{% url 'translator:about' %}">About</a>
-        </nav>
       </div>
     </footer>
   </body>

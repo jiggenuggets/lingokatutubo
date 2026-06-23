@@ -133,19 +133,26 @@
         <div class="job-meta-row">
           <dt>Needs Review</dt>
           <dd>
-            {% if segment_count %}
-              <span class="{% if translation_has_review_items %}needs-review{% endif %}">
-                {{ review_segment_count }} of {{ segment_count }}
-              </span>
+            {% if request.user.is_staff or request.user.is_superuser %}
+              {% if segment_count %}
+                <span class="{% if translation_has_review_items %}needs-review{% endif %}">
+                  {{ review_segment_count }} of {{ segment_count }}
+                </span>
+              {% else %}
+                <span class="text-muted">No segments</span>
+              {% endif %}
+            {% elif translation_has_review_items %}
+              <span class="text-muted">Some parts may need teacher review.</span>
             {% else %}
-              <span class="text-muted">No segments</span>
+              <span class="text-muted">No review needed</span>
             {% endif %}
           </dd>
         </div>
       </dl>
 
-      {# Technical details: Extraction Method, OCR Confidence, and OCR Warnings #}
-      {% if extraction_method_label and extraction_method_label != "—" or extraction_method == "ocr_image" or ocr_warnings %}
+      {% if request.user.is_staff or request.user.is_superuser %}
+      {# Technical details: Extraction Method, OCR Confidence, OCR Warnings, and the raw failure error #}
+      {% if extraction_method_label and extraction_method_label != "—" or extraction_method == "ocr_image" or ocr_warnings or technical_error_detail %}
       <details class="technical-details-panel">
         <summary class="technical-details-summary">Technical Details</summary>
         <dl class="job-meta-list technical-meta">
@@ -181,6 +188,13 @@
             </dd>
           </div>
           {% endif %}
+
+          {% if technical_error_detail %}
+          <div class="job-meta-row">
+            <dt>Error Detail</dt>
+            <dd><code class="technical-error-detail">{{ technical_error_detail }}</code></dd>
+          </div>
+          {% endif %}
         </dl>
 
         {% if ocr_warnings %}
@@ -199,6 +213,7 @@
         </div>
         {% endif %}
       </details>
+      {% endif %}
       {% endif %}
 
       {% if has_failed and failure_message %}
@@ -222,9 +237,9 @@
           <a class="button secondary" href="{% url 'translator:history' %}">← History</a>
 
           {% if can_preview %}
-            <a id="job-preview-action" class="button primary" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+            <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Opening Bilingual Preview…" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
           {% else %}
-            <a id="job-preview-action" class="button primary" href="{% url 'translator:job_preview' job.id %}" hidden></a>
+            <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Opening Bilingual Preview…" href="{% url 'translator:job_preview' job.id %}" hidden></a>
           {% endif %}
 
           {% if can_download %}

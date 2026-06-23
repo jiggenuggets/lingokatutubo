@@ -1,4 +1,5 @@
 {% extends "translator/base.html" %}
+{% load static %}
 
 {% block title %}LingoKatutubo Document Translation{% endblock %}
 
@@ -7,28 +8,25 @@
   <section class="hero">
     <div class="hero-copy">
       <p class="eyebrow">Preserving Indigenous Language</p>
-      <h1>Bagobo-Tagabawa Document Translation</h1>
+      <h1 class="hero-title">Bagobo-Tagabawa Document Translation</h1>
       <p class="hero-text">
         Translate documents across Bagobo-Tagabawa, Filipino, English, and Cebuano
         while retaining page structure for review and download.
       </p>
       <div class="hero-actions">
         <a class="button primary" href="{% url 'translator:translate' %}">Start Translating</a>
-        <a class="button secondary" href="{% url 'translator:about' %}">Learn More</a>
+        <a class="button secondary" href="#workflow">Learn More</a>
       </div>
     </div>
-    <div class="document-visual" aria-hidden="true">
-      <div class="paper-sheet">
-        <span></span><span></span><span></span><span></span>
-      </div>
-      <div class="translation-panel">
-        <strong>Original</strong>
-        <strong>Translated</strong>
-      </div>
+    <div class="hero-logo">
+      <img
+        src="{% static 'images/lingokatutubo-logo.png' %}"
+        alt="LINGOKATUTUBO logo"
+      >
     </div>
   </section>
 
-  <section class="feature-band">
+  <section class="feature-band" id="workflow">
     <div class="section-inner">
       <h2>Document Workflow</h2>
       <div class="feature-grid">

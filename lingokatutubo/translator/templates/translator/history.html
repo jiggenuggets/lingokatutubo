@@ -120,7 +120,7 @@
                     View Details
                   </a>
                   {% if state.can_preview %}
-                    <a class="button primary" href="{% url 'translator:job_preview' job.id %}" aria-label="Preview bilingual document for {{ state.document_title }}">
+                    <a class="button primary js-preview-link" data-loading-text="Opening Bilingual Preview…" href="{% url 'translator:job_preview' job.id %}" aria-label="Preview bilingual document for {{ state.document_title }}">
                       Preview Bilingual
                     </a>
                   {% endif %}

@@ -7,6 +7,8 @@ import re
 from typing import Dict, List, Optional
 from collections import Counter
 
+from .display_utils import clean_invisible_unicode
+
 
 SUPPORTED_LANGUAGES = ["english", "tagabawa", "filipino", "cebuano"]
 
@@ -68,6 +70,7 @@ class LanguageDetectionService:
               "alternatives": list
             }
         """
+        text = clean_invisible_unicode(text)
         if not text or not text.strip():
             return {"language": fallback, "confidence": 0.0,
                     "method": "fallback", "alternatives": []}

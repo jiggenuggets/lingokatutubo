@@ -14,6 +14,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 from pathlib import Path
 from typing import Optional, Tuple
+from .display_utils import safe_print
 from .models import DetectionType, FileType
 
 
@@ -46,7 +47,7 @@ class DetectionService:
             doc.close()
             return total, count
         except Exception as e:
-            print(f"[Detection] Error counting PDF text chars: {e}")
+            safe_print(f"[Detection] Error counting PDF text chars: {e}")
             return 0, 1
 
     @staticmethod
@@ -81,7 +82,7 @@ class DetectionService:
             finally:
                 doc.close()
         except Exception as e:
-            print(f"[Detection] Error checking visible PDF text: {e}")
+            safe_print(f"[Detection] Error checking visible PDF text: {e}")
         return False
 
     @classmethod
@@ -107,14 +108,14 @@ class DetectionService:
                 and cls._has_visible_pdf_text(pdf_path)
             )
             is_digital = avg_chars >= MIN_CHARS_PER_PAGE or has_visible_text
-            print(
+            safe_print(
                 f"[Detection] PDF text chars: {total_chars} across {page_count} page(s) "
                 f"(avg {avg_chars:.1f}/page) -> {'DIGITAL' if is_digital else 'SCANNED'}"
             )
             return DetectionType.DIGITAL if is_digital else DetectionType.SCANNED
 
         except Exception as e:
-            print(f"[Detection] Error detecting PDF type: {e}")
+            safe_print(f"[Detection] Error detecting PDF type: {e}")
             return DetectionType.SCANNED
 
     @staticmethod
@@ -140,7 +141,7 @@ class DetectionService:
             return DetectionType.SCANNED
 
         except Exception as e:
-            print(f"[Detection] Error detecting image type: {e}")
+            safe_print(f"[Detection] Error detecting image type: {e}")
             return DetectionType.SCANNED
 
     @staticmethod

@@ -6,6 +6,9 @@ import fitz  # PyMuPDF
 import os
 from typing import List, Dict, Any, Optional, Tuple
 
+from .display_utils import clean_invisible_unicode, safe_print
+from .translation_display import get_display_translation_text
+
 
 class ReconstructionService:
     """Rebuilds PDFs with translated text while preserving original layout"""
@@ -14,7 +17,7 @@ class ReconstructionService:
     MIN_FONT_SIZE = 5.5
     LINE_HEIGHT_FACTOR = 1.12
     HEAVY_SHRINK_RATIO = 0.72
-    FALLBACK_REVIEW_TEXT = "[UNKNOWN_FOR_REVIEW]"
+    FALLBACK_REVIEW_TEXT = ""
     _unicode_fontfile_checked = False
     _unicode_fontfile_path: Optional[str] = None
 
@@ -26,19 +29,17 @@ class ReconstructionService:
     @classmethod
     def _coerce_translation_value(cls, value: Any, fallback: str) -> str:
         """Support both legacy string translations and dict translation records."""
+        fallback = clean_invisible_unicode(fallback)
         if value is None:
-            return cls.FALLBACK_REVIEW_TEXT
+            return str(fallback or "")
         if isinstance(value, dict):
-            translated = value.get("translated")
-            if translated is None or not str(translated).strip():
-                return cls.FALLBACK_REVIEW_TEXT
-            if (
-                str(translated).strip() == fallback.strip()
-                and str(value.get("method") or "").lower() == "untranslated"
-            ):
-                return cls.FALLBACK_REVIEW_TEXT
-            return str(translated)
-        return str(value)
+            return get_display_translation_text(
+                fallback,
+                value.get("translated") or value.get("translated_text"),
+                value.get("method") or value.get("translation_method"),
+                value.get("cascade_stage"),
+            )
+        return get_display_translation_text(fallback, clean_invisible_unicode(value))
 
     @classmethod
     def _translation_record_for_line(
@@ -64,7 +65,7 @@ class ReconstructionService:
         """Resolve translated text by layout key first, then by original source text."""
         record = cls._translation_record_for_line(translations, lookup_key, original_text)
         if record is None:
-            return cls.FALLBACK_REVIEW_TEXT
+            return str(original_text or "")
         return cls._coerce_translation_value(record, original_text)
 
     @staticmethod
@@ -218,6 +219,7 @@ class ReconstructionService:
 
     @staticmethod
     def _pdf_safe_text(text: str) -> str:
+        text = clean_invisible_unicode(text)
         return "".join(char if ord(char) <= 255 else "?" for char in text)
 
     @staticmethod
@@ -373,11 +375,17 @@ class ReconstructionService:
         line_number: int,
         fallback_text: Optional[str] = None,
     ) -> bool:
-        # The only fallback text we ever render is the review marker. Callers
-        # may still pass the source-language original for logging/diagnostic
-        # purposes, but we never draw it into the translated PDF.
-        del fallback_text
-        fallback_text = cls.FALLBACK_REVIEW_TEXT
+        text = clean_invisible_unicode(text)
+        fallback_text = clean_invisible_unicode(fallback_text or text or "")
+        if not text.strip():
+            text = fallback_text
+        if not text.strip():
+            cls._append_warning(
+                warnings,
+                f"Page {page_number}, block {block_number}, line {line_number}: "
+                "no display-safe translated text was available.",
+            )
+            return False
         fontname = cls._fontname_for_line(line)
         unicode_fontfile = cls._unicode_fontfile() if cls._needs_unicode_font(text) else None
         if unicode_fontfile:
@@ -406,7 +414,7 @@ class ReconstructionService:
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                "translated text could not fit inside its bbox; using visible fallback text.",
+                "translated text could not fit inside its bbox; using display-safe fallback text.",
             )
             fitted_text, fontsize, shrunk, truncated = cls._fit_text_to_rect(
                 fallback_text,
@@ -571,26 +579,28 @@ class ReconstructionService:
             last_exception = e
 
         # All translated-text draw attempts threw before drawing anything. As a
-        # last resort, render the review marker so the bbox is not left empty.
-        # We never substitute the source-language original here.
+        # last resort, render the display-safe fallback text. Raw review markers
+        # are never drawn into the translated PDF body.
         cls._append_warning(
             warnings,
             f"Page {page_number}, block {block_number}, line {line_number}: "
-            "translated text could not be inserted; using review marker.",
+            "translated text could not be inserted; using display-safe fallback text.",
         )
-        marker = cls._pdf_safe_text(cls.FALLBACK_REVIEW_TEXT)
-        fitted_marker, marker_size, _, _ = cls._fit_text_to_rect(
-            marker,
+        fallback = cls._pdf_safe_text(fallback_text or text)
+        if not fallback.strip():
+            return False
+        fitted_fallback, fallback_size, _, _ = cls._fit_text_to_rect(
+            fallback,
             rect,
             "helv",
             min(base_font_size, 8.0),
         )
-        visible_marker = fitted_marker.strip() or cls.FALLBACK_REVIEW_TEXT
+        visible_fallback = fitted_fallback.strip() or fallback
         try:
             page.insert_textbox(
                 rect,
-                visible_marker,
-                fontsize=marker_size,
+                visible_fallback,
+                fontsize=fallback_size,
                 fontname="helv",
                 color=(0.0, 0.0, 0.0),
                 align=fitz.TEXT_ALIGN_LEFT,
@@ -603,12 +613,12 @@ class ReconstructionService:
         try:
             baseline_y = max(
                 rect.y0 + cls.MIN_FONT_SIZE,
-                min(rect.y1 - 1, rect.y0 + marker_size),
+                min(rect.y1 - 1, rect.y0 + fallback_size),
             )
             page.insert_text(
                 (rect.x0 + 0.5, baseline_y),
-                visible_marker.splitlines()[0],
-                fontsize=max(4.0, min(marker_size, cls.MIN_FONT_SIZE)),
+                visible_fallback.splitlines()[0],
+                fontsize=max(4.0, min(fallback_size, cls.MIN_FONT_SIZE)),
                 fontname="helv",
                 color=(0.0, 0.0, 0.0),
                 overlay=True,
@@ -618,7 +628,7 @@ class ReconstructionService:
             cls._append_warning(
                 warnings,
                 f"Page {page_number}, block {block_number}, line {line_number}: "
-                f"failed to insert review marker: {e}"
+                f"failed to insert display-safe fallback text: {e}"
                 + (f" (last translated-text error: {last_exception})" if last_exception else ""),
             )
 
@@ -679,10 +689,9 @@ class ReconstructionService:
                 #       are preserved).
                 #   (3) Draw the translated text into each rect on top of the
                 #       cleaned page.
-                # This guarantees the translated PDF never contains the
-                # source-language original — visually, via copy/paste, or via
-                # text extraction — without flattening the page or destroying
-                # non-text layout.
+                # Unknown segments resolve to display-safe source text; known
+                # translations replace the source glyphs without flattening the
+                # page or destroying non-text layout.
                 tasks: List[Dict[str, Any]] = []
                 for block_idx, block in enumerate(blocks, start=1):
                     if block.get("type") != "text":
@@ -691,7 +700,7 @@ class ReconstructionService:
                     lines = block.get("lines", [])
 
                     for line_idx, line in enumerate(lines, start=1):
-                        original_text = line.get("text", "")
+                        original_text = clean_invisible_unicode(line.get("text", ""))
                         lookup_key = f"{page_num}_{block_idx - 1}_{line_idx - 1}"
                         translation_record = ReconstructionService._translation_record_for_line(
                             translations,
@@ -741,6 +750,7 @@ class ReconstructionService:
                         tasks.append({
                             "rect": rect,
                             "translated_text": translated_text,
+                            "source_text": original_text,
                             "line": line,
                             "block_idx": block_idx,
                             "line_idx": line_idx,
@@ -798,7 +808,7 @@ class ReconstructionService:
                 # Pass 3: draw the translated text into each (now-cleaned) rect.
                 for task in tasks:
                     rect = task["rect"]
-                    translated_text = task["translated_text"]
+                    translated_text = clean_invisible_unicode(task["translated_text"])
                     line = task["line"]
                     block_idx = task["block_idx"]
                     line_idx = task["line_idx"]
@@ -812,16 +822,17 @@ class ReconstructionService:
                             page_num + 1,
                             block_idx,
                             line_idx,
+                            fallback_text=task.get("source_text") or translated_text,
                         )
                         if not inserted:
                             ReconstructionService._append_warning(
                                 layout_warnings,
                                 f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
                                 "source text was removed but neither translated text nor "
-                                "review marker could be inserted; original English was NOT restored."
+                                "display-safe fallback text could be inserted."
                             )
                     except Exception as e:
-                        print(f"[Reconstruction] Error inserting text: {e}")
+                        safe_print(f"[Reconstruction] Error inserting text: {e}")
                         ReconstructionService._append_warning(
                             layout_warnings,
                             f"Page {page_num + 1}, block {block_idx}, line {line_idx}: "
@@ -836,7 +847,7 @@ class ReconstructionService:
             return True
         
         except Exception as e:
-            print(f"[Reconstruction] Error reconstructing PDF: {e}")
+            safe_print(f"[Reconstruction] Error reconstructing PDF: {e}")
             return False
     
     @staticmethod
@@ -882,7 +893,7 @@ class ReconstructionService:
             return True
         
         except Exception as e:
-            print(f"[Reconstruction] Error creating bilingual PDF: {e}")
+            safe_print(f"[Reconstruction] Error creating bilingual PDF: {e}")
             return False
     
     @staticmethod
@@ -930,7 +941,7 @@ class ReconstructionService:
             doc.close()
         
         except Exception as e:
-            print(f"[Reconstruction] Error creating preview images: {e}")
+            safe_print(f"[Reconstruction] Error creating preview images: {e}")
         
         return image_paths
 

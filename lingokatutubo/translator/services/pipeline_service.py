@@ -3,7 +3,6 @@ Translation pipeline coordinator
 Orchestrates the entire translation workflow
 """
 
-import asyncio
 import os
 import re
 from typing import Optional, Dict, Any, Callable, List, Sequence, Union
@@ -15,7 +14,13 @@ from .file_service import get_file_service
 from .detection_service import get_detection_service
 from .extraction_service import get_extraction_service
 from .reconstruction_service import get_reconstruction_service
+from .display_utils import clean_invisible_unicode, safe_print
 from .translation_dataset import UNKNOWN_FOR_REVIEW, get_translation_dataset
+from .translation_display import (
+    get_display_translation_text,
+    is_display_fallback_translation,
+)
+from .neural_translation_service import NEURAL_METHOD
 from .language_detection_service import get_language_detection_service
 from .ocr_stage import OCRUnavailableError, get_ocr_service
 
@@ -136,7 +141,7 @@ class PipelineService:
         job.metadata["progress_percent"] = job.progress
         self._persist_job(job)
     
-    async def process_translation(
+    def process_translation(
         self,
         job_id: str,
         input_file_path: str,
@@ -168,10 +173,10 @@ class PipelineService:
         try:
             self._set_job_phase(job, "detecting")
 
-            print(f"[Pipeline] Job {job_id} started")
+            safe_print(f"[Pipeline] Job {job_id} started")
 
             # Phase 1: Detect file type (digital vs scanned)
-            print(f"[Pipeline] Phase 1: Detecting file type for {job_id}")
+            safe_print(f"[Pipeline] Phase 1: Detecting file type for {job_id}")
             
             if file_type == FileType.TXT:
                 job.detection_type = DetectionType.DIGITAL
@@ -182,11 +187,11 @@ class PipelineService:
             else:  # JPG, PNG
                 job.detection_type = self.detection_service.detect_image_type(input_file_path)
             
-            print(f"[Pipeline] Detected: {job.detection_type}")
+            safe_print(f"[Pipeline] Detected: {job.detection_type}")
             self._persist_job(job)
             
             # Phase 2: Extract text and layout
-            print(f"[Pipeline] Phase 2: Extracting text and layout")
+            safe_print(f"[Pipeline] Phase 2: Extracting text and layout")
             self._set_job_phase(job, "extracting")
             
             layout_data = []
@@ -219,13 +224,13 @@ class PipelineService:
                 try:
                     ocr_dpi = getattr(self.ocr_service, "dpi", "default")
                     if file_type == FileType.PDF:
-                        print(f"[Pipeline] SCANNED PDF - running Tesseract OCR at {ocr_dpi} DPI")
+                        safe_print(f"[Pipeline] SCANNED PDF - running Tesseract OCR at {ocr_dpi} DPI")
                         layout_data = self.ocr_service.extract_pdf_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
                         )
                     elif file_type in (FileType.JPG, FileType.PNG):
-                        print(f"[Pipeline] Image input - running Tesseract OCR at {ocr_dpi} DPI")
+                        safe_print(f"[Pipeline] Image input - running Tesseract OCR at {ocr_dpi} DPI")
                         layout_data = self.ocr_service.extract_image_text_and_layout(
                             input_file_path,
                             languages=requested_ocr_languages,
@@ -264,11 +269,11 @@ class PipelineService:
                         )
                 except OCRUnavailableError as e:
                     ocr_unavailable_msg = str(e)
-                    print(f"[Pipeline] OCR unavailable: {e}")
+                    safe_print(f"[Pipeline] OCR unavailable: {e}")
                     layout_data = []
                     job.metadata["extraction_method"] = "ocr_image"
                 except Exception as e:
-                    print(f"[Pipeline] OCR error: {e}")
+                    safe_print(f"[Pipeline] OCR error: {e}")
                     ocr_unavailable_msg = f"OCR error: {e}"
                     layout_data = []
                     job.metadata["extraction_method"] = "ocr_image"
@@ -278,6 +283,7 @@ class PipelineService:
             # so callers can inspect the warnings.
             if layout_data is None:
                 layout_data = []
+            layout_data = self._clean_layout_data(layout_data)
 
             # Structural validation: fail early with a clear message rather than
             # letting a malformed layout silently produce broken reconstruction output.
@@ -305,7 +311,7 @@ class PipelineService:
                 job.metadata["structure_file"] = structure_path
                 self._persist_job(job)
             except Exception as struct_err:
-                print(f"[Pipeline] Failed to build structure.json: {struct_err}")
+                safe_print(f"[Pipeline] Failed to build structure.json: {struct_err}")
 
             # Now enforce: we need at least one extractable text block to
             # continue. Fail loudly with an actionable message rather than
@@ -315,7 +321,10 @@ class PipelineService:
                 for page in layout_data
                 for block in page.get("blocks", [])
                 if block.get("type") == "text"
-                and any((line.get("text") or "").strip() for line in block.get("lines", []))
+                and any(
+                    clean_invisible_unicode(line.get("text") or "").strip()
+                    for line in block.get("lines", [])
+                )
             )
             if text_block_count == 0:
                 if ocr_unavailable_msg:
@@ -333,7 +342,7 @@ class PipelineService:
 
             # Phase 2.5: Auto-detect source language if requested
             if source_language == "auto":
-                print(f"[Pipeline] Phase 2.5: Auto-detecting source language")
+                safe_print(f"[Pipeline] Phase 2.5: Auto-detecting source language")
                 text_samples = [
                     line.get("text", "")
                     for page in layout_data[:3]
@@ -345,22 +354,22 @@ class PipelineService:
                 lang_result = self.language_service.detect_document_language(text_samples)
                 detected = lang_result["primary_language"]
                 confidence = lang_result["confidence"]
-                print(f"[Pipeline] Detected: {detected} (confidence: {confidence:.2f})")
+                safe_print(f"[Pipeline] Detected: {detected} (confidence: {confidence:.2f})")
                 job.metadata["detected_language"] = detected
                 job.metadata["detection_confidence"] = round(confidence, 3)
                 job.metadata["is_mixed_language"] = lang_result.get("is_mixed", False)
                 job.metadata["language_distribution"] = lang_result.get("language_distribution", {})
                 self._persist_job(job)
                 source_language = detected
-                print(f"[Pipeline] Language detected: {detected} (confidence: {confidence:.2f})")
+                safe_print(f"[Pipeline] Language detected: {detected} (confidence: {confidence:.2f})")
             else:
                 job.metadata["detected_language"] = source_language
                 job.metadata["detection_confidence"] = 1.0
                 self._persist_job(job)
-                print(f"[Pipeline] Language set manually: {source_language}")
+                safe_print(f"[Pipeline] Language set manually: {source_language}")
 
             # Phase 3: Translate text
-            print(f"[Pipeline] Phase 3: Translating text ({source_language} -> {target_language})")
+            safe_print(f"[Pipeline] Phase 3: Translating text ({source_language} -> {target_language})")
             self._set_job_phase(job, "translating")
 
             translation_warnings: List[str] = []
@@ -378,7 +387,10 @@ class PipelineService:
             # Debug: log first 10 translation pairs to backend console
             _sample = list(translations.items())[:10]
             for _orig, _xlat in _sample:
-                print(f'[Pipeline] Translated: "{_orig}" -> "{_xlat}"')
+                safe_print(
+                    f'[Pipeline] Translated: "{clean_invisible_unicode(_orig)}" -> '
+                    f'"{clean_invisible_unicode(_xlat)}"'
+                )
 
             job.metadata["translated_blocks"] = len(translations)
             job.metadata["bilingual_first_page"] = self._build_bilingual_first_page(
@@ -389,7 +401,7 @@ class PipelineService:
             self._attach_translations_to_structure(job_id, translations)
 
             # Phase 4: Reconstruct document
-            print(f"[Pipeline] Phase 4: Reconstructing document")
+            safe_print(f"[Pipeline] Phase 4: Reconstructing document")
             self._set_job_phase(job, "reconstructing")
             
             output_pdf_path = self.file_service.get_output_path(job_id, "translated.pdf")
@@ -404,6 +416,16 @@ class PipelineService:
                     is_scanned=job.detection_type == DetectionType.SCANNED,
                     layout_warnings=layout_warnings,
                 )
+                if not success:
+                    layout_warnings.append(
+                        "Exact PDF layout reconstruction failed; generated a clean translated-text PDF instead."
+                    )
+                    success = self._create_output_pdf(
+                        layout_data,
+                        translations,
+                        output_pdf_path,
+                        layout_warnings=layout_warnings,
+                    )
             else:
                 # For DOCX/images, create a simple PDF output
                 success = self._create_output_pdf(
@@ -426,10 +448,10 @@ class PipelineService:
             if not os.path.exists(output_pdf_path):
                 raise Exception(f"Output PDF was not created at: {output_pdf_path}")
 
-            print(f"[Pipeline] Output PDF created: {output_pdf_path} ({os.path.getsize(output_pdf_path)} bytes)")
+            safe_print(f"[Pipeline] Output PDF created: {output_pdf_path} ({os.path.getsize(output_pdf_path)} bytes)")
 
             # Phase 5: Create bilingual preview
-            print(f"[Pipeline] Phase 5: Creating preview")
+            safe_print(f"[Pipeline] Phase 5: Creating preview")
             self._set_job_phase(job, "preview_generation")
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
@@ -461,7 +483,7 @@ class PipelineService:
             self._persist_job(job)
 
             # Phase 6: Create bilingual PDF
-            print(f"[Pipeline] Phase 6: Creating bilingual PDF")
+            safe_print(f"[Pipeline] Phase 6: Creating bilingual PDF")
             self._set_job_phase(job, "bilingual_output")
             
             bilingual_path = self.file_service.get_output_path(job_id, "bilingual.pdf")
@@ -478,7 +500,7 @@ class PipelineService:
             job.completed_at = datetime.now()
             self._set_job_phase(job, "completed")
             
-            print(f"[Pipeline] Job {job_id} completed successfully")
+            safe_print(f"[Pipeline] Job {job_id} completed successfully")
             return True
         
         except Exception as e:
@@ -492,7 +514,7 @@ class PipelineService:
             job.metadata["current_step"] = job.current_step
             job.metadata["progress_percent"] = job.progress
             self._persist_job(job)
-            print(f"[Pipeline] Job {job_id} failed: {e}")
+            safe_print(f"[Pipeline] Job {job_id} failed: {e}")
             return False
 
     @staticmethod
@@ -565,7 +587,7 @@ class PipelineService:
                 lines = block.get("lines", [])
                 
                 for line_index, line in enumerate(lines):
-                    original = line.get("text", "").strip()
+                    original = clean_invisible_unicode(line.get("text", "")).strip()
                     if not original:
                         continue
                     
@@ -588,6 +610,19 @@ class PipelineService:
                                 "cascade_stage": "unknown",
                                 "confidence": None,
                             }
+
+                        # Experimental ByT5 fallback: only for segments the
+                        # phrasebook could not match, and only Tagabawa->English.
+                        # Disabled by default and fails safe (returns None).
+                        if self._is_unmatched(translation_meta):
+                            neural_meta = self._neural_fallback(
+                                original,
+                                source_lang,
+                                target_lang,
+                                translation_warnings=translation_warnings,
+                            )
+                            if neural_meta is not None:
+                                translation_meta = neural_meta
                     except Exception as exc:
                         message = (
                             f"Page {page_index + 1}, block {block_index + 1}, line {line_index + 1}: "
@@ -606,10 +641,13 @@ class PipelineService:
                     line_id = f"{page_index}_{block_index}_{line_index}"
                     record = {
                         "original": original,
-                        "translated": translation_meta.get("translated", original),
+                        "translated": clean_invisible_unicode(
+                            translation_meta.get("translated", original)
+                        ),
                         "method": translation_meta.get("method", "unknown"),
                         "cascade_stage": translation_meta.get("cascade_stage", translation_meta.get("method", "unknown")),
                         "confidence": translation_meta.get("confidence"),
+                        "warning": translation_meta.get("warning"),
                         "source_language": source_lang,
                         "target_language": target_lang,
                     }
@@ -618,8 +656,71 @@ class PipelineService:
                     translations[original.strip()] = record
                     # Legacy block-level key for older reconstruction callers.
                     translations[block_id] = record
-        
+
         return translations
+
+    @staticmethod
+    def _is_unmatched(translation_meta: Dict[str, Any]) -> bool:
+        """True when the phrasebook cascade produced no usable translation.
+
+        The ByT5 fallback is only consulted for these segments, so the
+        phrasebook always wins when it has an answer.
+        """
+        if not isinstance(translation_meta, dict):
+            return True
+        method = clean_invisible_unicode(translation_meta.get("method")).lower()
+        cascade_stage = clean_invisible_unicode(translation_meta.get("cascade_stage")).lower()
+        translated = clean_invisible_unicode(translation_meta.get("translated")).strip()
+        return is_display_fallback_translation(translated, method, cascade_stage)
+
+    def _neural_fallback(
+        self,
+        original: str,
+        source_lang: str,
+        target_lang: str,
+        translation_warnings: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Consult the experimental ByT5 service for an unmatched segment.
+
+        Returns a translation_meta dict on success, or None so the caller
+        keeps the phrasebook's review marker. Never raises: a disabled,
+        unavailable, or failing model simply yields None. A one-time load
+        warning is surfaced into the job's translation warnings.
+        """
+        try:
+            from .neural_translation_service import get_neural_translation_service
+
+            service = get_neural_translation_service()
+            if not service.is_enabled():
+                return None
+
+            result = service.translate_unmatched(original, source_lang, target_lang)
+
+            # Surface a load/availability warning once so the operator can see
+            # why neural output did not appear, without crashing the job.
+            if translation_warnings is not None and service.load_warning:
+                if service.load_warning not in translation_warnings:
+                    translation_warnings.append(service.load_warning)
+
+            return result
+        except Exception as exc:  # noqa: BLE001 - fallback must never break a job.
+            safe_print(f"[Pipeline] Neural fallback unavailable: {exc}")
+            return None
+
+    @staticmethod
+    def _clean_layout_data(value: Any) -> Any:
+        if isinstance(value, str):
+            return clean_invisible_unicode(value)
+        if isinstance(value, dict):
+            return {
+                key: PipelineService._clean_layout_data(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [PipelineService._clean_layout_data(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(PipelineService._clean_layout_data(item) for item in value)
+        return value
 
     @staticmethod
     def _validate_layout_data(layout_data: list) -> None:
@@ -667,7 +768,7 @@ class PipelineService:
     def _extract_txt_text_and_layout(txt_path: str) -> List[Dict[str, Any]]:
         """Represent a UTF-8 text file as one simple page of paragraph lines."""
         with open(txt_path, "r", encoding="utf-8") as handle:
-            text = handle.read()
+            text = clean_invisible_unicode(handle.read())
 
         paragraphs = [
             paragraph.strip()
@@ -809,9 +910,9 @@ class PipelineService:
 
                 if block_type == "text":
                     text = " ".join(
-                        line.get("text", "").strip()
+                        clean_invisible_unicode(line.get("text", "")).strip()
                         for line in block.get("lines", [])
-                        if line.get("text", "").strip()
+                        if clean_invisible_unicode(line.get("text", "")).strip()
                     ).strip()
                     if not text:
                         continue
@@ -915,7 +1016,7 @@ class PipelineService:
         os.makedirs(os.path.dirname(structure_path), exist_ok=True)
         with open(structure_path, "w", encoding="utf-8") as f:
             json.dump(structure, f, ensure_ascii=False, indent=2)
-        print(f"[Pipeline] structure.json saved: {structure_path}")
+        safe_print(f"[Pipeline] structure.json saved: {structure_path}")
         return structure_path
 
     def _attach_translations_to_structure(
@@ -944,9 +1045,10 @@ class PipelineService:
                     line_translations: List[str] = []
                     line_methods: List[str] = []
                     line_confidences: List[float] = []
+                    block_warning: Optional[str] = None
 
                     for line_idx, line in enumerate(block.get("lines", [])):
-                        source_text = (line.get("text") or "").strip()
+                        source_text = clean_invisible_unicode(line.get("text") or "").strip()
                         record = self._translation_record_for_line(
                             translations,
                             page_idx,
@@ -959,22 +1061,35 @@ class PipelineService:
                             line["translation_method"] = None
                             line["cascade_stage"] = None
                             line["translation_confidence"] = None
+                            line["translation_warning"] = None
                             continue
 
-                        translated = record.get("translated")
                         method = record.get("method")
+                        cascade_stage = record.get("cascade_stage", method)
+                        translated = clean_invisible_unicode(record.get("translated"))
+                        display_translated = get_display_translation_text(
+                            source_text,
+                            translated,
+                            method,
+                            cascade_stage,
+                        )
                         confidence = record.get("confidence")
+                        warning = record.get("warning")
                         line["translated_text"] = translated
+                        line["display_translated_text"] = display_translated
                         line["translation_method"] = method
-                        line["cascade_stage"] = record.get("cascade_stage", method)
+                        line["cascade_stage"] = cascade_stage
                         line["translation_confidence"] = confidence
+                        line["translation_warning"] = warning
 
-                        if translated:
-                            line_translations.append(str(translated))
+                        if display_translated:
+                            line_translations.append(str(display_translated))
                         if method:
                             line_methods.append(str(method))
                         if isinstance(confidence, (int, float)):
                             line_confidences.append(float(confidence))
+                        if warning and block_warning is None:
+                            block_warning = warning
 
                     block["translated_text"] = " ".join(line_translations).strip() or None
                     block["translation_method"] = (
@@ -988,11 +1103,12 @@ class PipelineService:
                         if line_confidences
                         else None
                     )
+                    block["translation_warning"] = block_warning
 
             with open(structure_path, "w", encoding="utf-8") as f:
                 json.dump(structure, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[Pipeline] Failed to attach translations to structure.json: {e}")
+            safe_print(f"[Pipeline] Failed to attach translations to structure.json: {e}")
 
     @staticmethod
     def _translation_record_for_line(
@@ -1032,7 +1148,9 @@ class PipelineService:
 
     @staticmethod
     def _json_safe_value(value: Any) -> Any:
-        if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str):
+            return clean_invisible_unicode(value)
+        if isinstance(value, (int, float, bool)) or value is None:
             return value
         if isinstance(value, dict):
             return {
@@ -1042,7 +1160,7 @@ class PipelineService:
             }
         if isinstance(value, (list, tuple)):
             return [PipelineService._json_safe_value(item) for item in value]
-        return str(value)
+        return clean_invisible_unicode(value)
 
     def _block_metadata(self, block: Dict[str, Any]) -> Dict[str, Any]:
         metadata = {}
@@ -1055,7 +1173,7 @@ class PipelineService:
     def _structure_lines(self, block: Dict[str, Any]) -> List[Dict[str, Any]]:
         lines_out: List[Dict[str, Any]] = []
         for idx, line in enumerate(block.get("lines", []), start=1):
-            text = (line.get("text") or "").strip()
+            text = clean_invisible_unicode(line.get("text") or "").strip()
             if not text:
                 continue
             line_out = {
@@ -1100,7 +1218,7 @@ class PipelineService:
             with open(structure_path, "w", encoding="utf-8") as f:
                 json.dump(structure, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[Pipeline] Failed to append layout warnings to structure.json: {e}")
+            safe_print(f"[Pipeline] Failed to append layout warnings to structure.json: {e}")
 
     def _extract_hybrid_pdf(
         self,
@@ -1151,7 +1269,7 @@ class PipelineService:
         try:
             for page_idx in range(doc.page_count):
                 page = doc[page_idx]
-                text = page.get_text()
+                text = clean_invisible_unicode(page.get_text())
                 char_count = len(
                     text.replace(" ", "").replace("\n", "").replace("\t", "")
                 )
@@ -1293,7 +1411,7 @@ class PipelineService:
                     lines = block.get("lines", [])
                     
                     for line_idx, line in enumerate(lines, start=1):
-                        original = (line.get("text") or "").strip()
+                        original = clean_invisible_unicode(line.get("text") or "").strip()
                         line_key = f"{page_idx}_{block_idx - 1}_{line_idx - 1}"
                         block_id = f"{page_idx}_{block_idx - 1}"
                         record = (
@@ -1303,12 +1421,21 @@ class PipelineService:
                             or {}
                         )
                         method = str(record.get("method") or "").lower() if isinstance(record, dict) else ""
-                        translated = record.get("translated") if isinstance(record, dict) else None
-                        # Never silently fall back to the source-language text:
-                        # if we have no translation, draw the review marker so
-                        # the user can see the gap instead of being misled.
-                        if not translated or not str(translated).strip():
-                            translated = UNKNOWN_FOR_REVIEW
+                        cascade_stage = (
+                            str(record.get("cascade_stage") or "").lower()
+                            if isinstance(record, dict)
+                            else ""
+                        )
+                        translated = (
+                            get_display_translation_text(
+                                original,
+                                record.get("translated") if isinstance(record, dict) else None,
+                                method,
+                                cascade_stage,
+                            )
+                            if isinstance(record, dict)
+                            else original
+                        )
 
                         if not translated:
                             continue
@@ -1331,12 +1458,13 @@ class PipelineService:
                         self.reconstruction_service._insert_text_in_rect(
                             page,
                             rect,
-                            translated,
+                            clean_invisible_unicode(translated),
                             line,
                             layout_warnings,
                             page_idx + 1,
                             block_idx,
                             line_idx,
+                            fallback_text=original,
                         )
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1345,7 +1473,7 @@ class PipelineService:
             return True
         
         except Exception as e:
-            print(f"[Pipeline] Error creating output PDF: {e}")
+            safe_print(f"[Pipeline] Error creating output PDF: {e}")
             return False
 
     def _build_bilingual_first_page(
@@ -1364,7 +1492,7 @@ class PipelineService:
 
             block_bbox = block.get("bbox")
             for line_index, line in enumerate(block.get("lines", [])):
-                original_text = line.get("text", "").strip()
+                original_text = clean_invisible_unicode(line.get("text", "")).strip()
                 if not original_text:
                     continue
 
@@ -1377,23 +1505,33 @@ class PipelineService:
                     or translations.get(block_id)
                     or {}
                 )
-                translated_text = line.get("translation") or record.get("translated") or UNKNOWN_FOR_REVIEW
                 method = record.get("method") or record.get("cascade_stage") or "unknown"
+                cascade_stage = record.get("cascade_stage", method)
                 confidence = record.get("confidence")
+                raw_translated_text = clean_invisible_unicode(
+                    line.get("translation") or record.get("translated") or ""
+                )
+                translated_text = get_display_translation_text(
+                    original_text,
+                    raw_translated_text,
+                    method,
+                    cascade_stage,
+                )
                 needs_review = (
-                    not translated_text
-                    or UNKNOWN_FOR_REVIEW in str(translated_text)
-                    or method == "unknown_for_review"
+                    is_display_fallback_translation(raw_translated_text, method, cascade_stage)
+                    or method == NEURAL_METHOD
                 )
                 blocks_output.append(
                     {
                         "source_text": original_text,
                         "original_text": original_text,
                         "translated_text": translated_text,
+                        "raw_translated_text": raw_translated_text,
                         "translation_method": method,
-                        "cascade_stage": record.get("cascade_stage", method),
+                        "cascade_stage": cascade_stage,
                         "translation_confidence": confidence,
                         "needs_review": needs_review,
+                        "warning": record.get("warning"),
                         "bbox": line.get("bbox") or block_bbox,
                     }
                 )

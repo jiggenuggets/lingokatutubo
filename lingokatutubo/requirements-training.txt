@@ -1,0 +1,21 @@
+# Separate environment for the experimental ByT5 Bagobo-Tagabawa -> English
+# fine-tuning pipeline (model_training/). Do NOT install this into the
+# Django app's environment — it is large, GPU-oriented, and unrelated to
+# the web app's runtime requirements.
+#
+# Install with (PowerShell):
+#   py -3.11 -m venv .venv-training
+#   .\.venv-training\Scripts\Activate.ps1
+#   python -m pip install --upgrade pip
+#   pip install -r requirements-training.txt
+
+torch>=2.2,<3.0
+transformers>=4.41,<6.0
+datasets>=2.19,<6.0
+accelerate>=1.0,<2.0
+evaluate>=0.4,<1.0
+sacrebleu>=2.4,<3.0
+sentencepiece>=0.2,<1.0
+pandas>=2.2,<4.0
+scikit-learn>=1.4,<2.0
+pytest>=8.0,<10.0

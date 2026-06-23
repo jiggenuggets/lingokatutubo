@@ -37,7 +37,7 @@
                   <div class="history-actions compact-actions">
                     <a class="button-link" href="{% url 'translator:job_detail' job.id %}">Details</a>
                     {% if state.can_preview %}
-                      <a class="button-link" href="{% url 'translator:job_preview' job.id %}">Preview</a>
+                      <a class="button-link js-preview-link" data-loading-text="Opening Preview…" href="{% url 'translator:job_preview' job.id %}">Preview</a>
                     {% endif %}
                     {% if state.can_download %}
                       <a class="button-link" href="{% url 'translator:job_download' job.id %}">Download</a>
@@ -135,7 +135,7 @@
       </button>
 
       <div id="complete-actions" class="complete-actions" hidden>
-        <a id="preview-link" class="button secondary full" href="#" hidden>Preview Bilingual</a>
+        <a id="preview-link" class="button secondary full js-preview-link" data-loading-text="Opening Bilingual Preview…" href="#" hidden>Preview Bilingual</a>
         <a id="download-link" class="button primary full" href="#" hidden>Download Translated PDF</a>
       </div>
 

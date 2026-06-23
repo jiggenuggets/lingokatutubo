@@ -5,6 +5,8 @@ Text extraction service for digital PDFs and DOCX files
 import fitz  # PyMuPDF
 from docx import Document
 from typing import List, Dict, Any, Optional
+
+from .display_utils import clean_invisible_unicode, safe_print
 from .models import TextSegment
 
 
@@ -64,7 +66,7 @@ class ExtractionService:
     @classmethod
     def _span_metadata(cls, span: Dict[str, Any]) -> Dict[str, Any]:
         metadata = {
-            "text": span.get("text", ""),
+            "text": clean_invisible_unicode(span.get("text", "")),
             "bbox": cls._bbox_to_list(span.get("bbox")),
             "font": span.get("font", ""),
             "size": span.get("size"),
@@ -129,7 +131,7 @@ class ExtractionService:
                     "cell_count": len(cells),
                 })
         except Exception as e:
-            print(f"[Extraction] Table detection skipped: {e}")
+            safe_print(f"[Extraction] Table detection skipped: {e}")
         return table_blocks
 
     @classmethod
@@ -139,7 +141,7 @@ class ExtractionService:
         try:
             drawings = page.get_drawings()
         except Exception as e:
-            print(f"[Extraction] Drawing extraction skipped: {e}")
+            safe_print(f"[Extraction] Drawing extraction skipped: {e}")
             return drawing_blocks
 
         for idx, drawing in enumerate(drawings):
@@ -191,6 +193,7 @@ class ExtractionService:
                     for span in spans:
                         line_text += span.get("text", "")
                         span_metadata.append(cls._span_metadata(span))
+                    line_text = clean_invisible_unicode(line_text)
                     if line_text.strip():
                         first_span = next(
                             (s for s in spans if (s.get("text") or "").strip()),
@@ -236,7 +239,7 @@ class ExtractionService:
             doc.close()
         
         except Exception as e:
-            print(f"[Extraction] Error extracting PDF: {e}")
+            safe_print(f"[Extraction] Error extracting PDF: {e}")
         
         return pages_data
     
@@ -275,7 +278,7 @@ class ExtractionService:
             doc = Document(docx_path)
 
             for para in doc.paragraphs:
-                text = para.text.strip()
+                text = clean_invisible_unicode(para.text).strip()
                 if not text:
                     continue
 
@@ -308,7 +311,7 @@ class ExtractionService:
             _flush_page()
 
         except Exception as e:
-            print(f"[Extraction] Error extracting DOCX: {e}")
+            safe_print(f"[Extraction] Error extracting DOCX: {e}")
             if not pages_data:
                 pages_data.append({
                     "page": 0,
@@ -345,7 +348,7 @@ class ExtractionService:
                 lines = block.get("lines", [])
                 
                 for line in lines:
-                    text = line.get("text", "").strip()
+                    text = clean_invisible_unicode(line.get("text", "")).strip()
                     if not text:
                         continue
                     

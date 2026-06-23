@@ -2,12 +2,14 @@ import hashlib
 import json
 import os
 import re
+import copy
 from pathlib import Path
 from urllib.parse import urlparse
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login
+from django.contrib.auth import views as auth_views
 from django.contrib.auth.decorators import login_required
 from django.contrib.admin.views.decorators import staff_member_required
 from django.core.paginator import Paginator
@@ -38,17 +40,23 @@ from .services import (
     start_translation_job,
     translation_dataset_loaded,
 )
+from .services.display_utils import clean_invisible_unicode
+from .services.translation_display import get_display_translation, get_display_translation_text
 
 
 PREVIEW_IMAGE_NAME_RE = re.compile(r"^(?:original|translated)_page_\d+\.png$")
 
+# Shown to every user (staff included) in the prominent failure banner and the
+# JSON status API. Raw backend exception text (codec errors, tracebacks, file
+# paths, model paths) must never reach this surface — it only ever appears
+# inside the staff-only technical details panel on the job detail page.
+GENERIC_TRANSLATION_FAILURE_MESSAGE = (
+    "Translation could not be completed. Please try another file or contact the administrator."
+)
+
 
 def home(request):
     return render(request, "translator/home.html")
-
-
-def about(request):
-    return render(request, "translator/about.html")
 
 
 def signup(request):
@@ -61,6 +69,22 @@ def signup(request):
     else:
         form = SignUpForm()
     return render(request, "registration/signup.html", {"form": form})
+
+
+class TranslatorLoginView(auth_views.LoginView):
+    """Login view that tailors its heading when sent here to reach Translate.
+
+    `@login_required` on `translate()` redirects here with `next=/translate/`;
+    the template swaps its heading/subtext for that case instead of using a
+    flash message, since the destination is already implied by `next`.
+    """
+
+    template_name = "registration/login.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["next_is_translate"] = self.get_redirect_url() == reverse("translator:translate")
+        return context
 
 
 @login_required
@@ -143,6 +167,7 @@ def history(request):
             output_count=Count("generated_outputs", distinct=True),
         )
         .prefetch_related("generated_outputs", "pages", "ocr_results")
+        .order_by("-created_at")
     )
 
     if search_query:
@@ -255,6 +280,9 @@ def preview(request, job_id):
     except (ValueError, TypeError):
         page_number = 1
     segments_page = paginator.get_page(page_number)
+    for segment in segments_page.object_list:
+        segment.display_source_text = clean_invisible_unicode(segment.source_text)
+        segment.display_translated_text = get_display_translation(segment)
 
     return render(
         request,
@@ -414,6 +442,7 @@ def api_structure(request, job_id):
         )
 
     data["status"] = job.status
+    data = _display_safe_structure(data)
 
     return JsonResponse(data)
 
@@ -442,12 +471,15 @@ def api_preview(request, job_id):
         for item in metadata.get("preview_translated", [])
         if _preview_image_url(job, item)
     ]
+    bilingual_first_page = _display_safe_bilingual_first_page(
+        metadata.get("bilingual_first_page", {"blocks": []})
+    )
 
     return JsonResponse(
         {
             "job_id": job.job_id,
             "left_page_preview": original_pages[0] if original_pages else None,
-            "bilingual_first_page": metadata.get("bilingual_first_page", {"blocks": []}),
+            "bilingual_first_page": bilingual_first_page,
             "original_pages": original_pages,
             "translated_pages": translated_pages,
             "page_count": max(len(original_pages), len(translated_pages)),
@@ -456,8 +488,9 @@ def api_preview(request, job_id):
             "segments": [
                 {
                     "segment_index": segment.segment_index,
-                    "source_text": segment.source_text,
-                    "translated_text": segment.translated_text,
+                    "source_text": clean_invisible_unicode(segment.source_text),
+                    "translated_text": get_display_translation(segment),
+                    "display_translated_text": get_display_translation(segment),
                     "method": segment.method,
                     "confidence": segment.confidence,
                     "needs_review": segment.needs_review,
@@ -635,7 +668,37 @@ def _health_checks() -> list:
             "status": "ok" if dataset_loaded else "warning",
             "detail": "Loaded" if dataset_loaded else "Not loaded",
         },
+        _neural_model_health(),
     ]
+
+
+def _neural_model_health() -> dict:
+    """Report ByT5 neural fallback status without exposing the model path."""
+    try:
+        from translator.services.neural_translation_service import (
+            get_neural_translation_service,
+        )
+
+        service = get_neural_translation_service()
+        if not service.is_enabled():
+            return {
+                "name": "Neural fallback (ByT5)",
+                "status": "warning",
+                "detail": "Disabled (experimental; phrasebook handles all segments)",
+            }
+        if service.is_available():
+            return {
+                "name": "Neural fallback (ByT5)",
+                "status": "ok",
+                "detail": "Enabled and loaded (experimental; all output needs review)",
+            }
+        return {
+            "name": "Neural fallback (ByT5)",
+            "status": "warning",
+            "detail": service.load_warning or "Enabled but model not loaded",
+        }
+    except Exception as exc:
+        return {"name": "Neural fallback (ByT5)", "status": "error", "detail": str(exc)}
 
 
 def _database_health() -> dict:
@@ -825,7 +888,7 @@ def _job_payload(job: TranslationJob) -> dict:
         "phase_message": job.phase_message or _status_message(job.status),
         "detection_type": job.detection_type or None,
         "file_type": job.file_type,
-        "error": job.error or _failure_message(job) if job.status == TranslationJob.Status.FAILED else None,
+        "error": _failure_message(job) if job.status == TranslationJob.Status.FAILED else None,
         "detected_language": metadata.get("detected_language"),
         "detection_confidence": metadata.get("detection_confidence"),
         "is_mixed_language": metadata.get("is_mixed_language", False),
@@ -967,6 +1030,11 @@ def _job_card_context(job: TranslationJob) -> dict:
             "status_label": _status_label(job.status),
             "status_class": _status_class(job.status),
             "failure_message": _failure_message(job),
+            "technical_error_detail": (
+                clean_invisible_unicode(job.error)
+                if job.status == TranslationJob.Status.FAILED and job.error
+                else ""
+            ),
             "progress_percent": 100
             if job.status == TranslationJob.Status.COMPLETED
             else job.progress,
@@ -1216,9 +1284,15 @@ def _status_class(status: str) -> str:
 
 
 def _failure_message(job: TranslationJob) -> str:
+    """User-facing failure copy — always the safe generic message.
+
+    The raw backend error (``job.error``) may contain codec errors,
+    tracebacks, or file paths; it is exposed separately, only to staff, via
+    ``_job_card_context``'s ``technical_error_detail``.
+    """
     if job.status != TranslationJob.Status.FAILED:
         return ''
-    return job.error or 'Translation failed safely'
+    return GENERIC_TRANSLATION_FAILURE_MESSAGE
 
 
 def _translated_output_exists(job: TranslationJob) -> bool:
@@ -1274,11 +1348,131 @@ def _image_preview_context(job: TranslationJob) -> dict:
         if _preview_image_url(job, item)
     ]
 
+    document_pages = list(_iter_related(job, "pages"))
+    page_text = {
+        page.page_number: clean_invisible_unicode(page.extracted_text or "").strip()
+        for page in document_pages
+    }
+    source_segments = {}
+    translated_segments = {}
+    page_numbers = set(page_text)
+
+    for segment in job.segments.select_related("page").order_by("segment_index"):
+        # Segments are normally linked to the DocumentPage they were
+        # extracted from. Fall back to page 1 so a segment without that
+        # link (e.g. legacy data) still surfaces in the normal-user-facing
+        # Original/Translated panels instead of disappearing.
+        page_number = segment.page.page_number if segment.page else 1
+        page_numbers.add(page_number)
+        if segment.source_text:
+            source_segments.setdefault(page_number, []).append(
+                clean_invisible_unicode(segment.source_text)
+            )
+        display_translation = get_display_translation(segment)
+        if display_translation:
+            translated_segments.setdefault(page_number, []).append(display_translation)
+
+    image_page_count = max(len(original_pages), len(translated_pages))
+    if image_page_count:
+        page_numbers.update(range(1, image_page_count + 1))
+
+    page_pairs = []
+    for page_number in sorted(page_numbers):
+        original_text = page_text.get(page_number) or "\n".join(
+            source_segments.get(page_number, [])
+        )
+        translated_text = "\n".join(translated_segments.get(page_number, []))
+        page_pairs.append(
+            {
+                "number": page_number,
+                "original_url": original_pages[page_number - 1]
+                if page_number - 1 < len(original_pages)
+                else "",
+                "translated_url": translated_pages[page_number - 1]
+                if page_number - 1 < len(translated_pages)
+                else "",
+                "original_text": original_text,
+                "translated_text": translated_text,
+            }
+        )
+
     return {
         "original_pages": original_pages,
         "translated_pages": translated_pages,
-        "page_count": max(len(original_pages), len(translated_pages)),
+        "page_pairs": page_pairs,
+        "page_count": max(len(original_pages), len(translated_pages), len(page_pairs)),
     }
+
+
+def _display_safe_bilingual_first_page(data: dict) -> dict:
+    safe = copy.deepcopy(data or {"blocks": []})
+    for block in safe.get("blocks", []):
+        source_text = clean_invisible_unicode(
+            block.get("source_text") or block.get("original_text") or ""
+        )
+        method = block.get("translation_method") or block.get("method")
+        cascade_stage = block.get("cascade_stage")
+        translated_text = block.get("display_translated_text")
+        if translated_text is None:
+            translated_text = block.get("translated_text")
+        display_text = get_display_translation_text(
+            source_text,
+            translated_text,
+            method,
+            cascade_stage,
+        )
+        block["display_translated_text"] = display_text
+        block["translated_text"] = display_text
+        block.pop("raw_translated_text", None)
+    return safe
+
+
+def _display_safe_structure(data: dict) -> dict:
+    safe = copy.deepcopy(data)
+    for page in safe.get("pages", []):
+        for block in page.get("blocks", []):
+            if block.get("type") != "text" and block.get("block_type") != "text":
+                continue
+            block_source_parts = []
+            block_display_parts = []
+            for line in block.get("lines", []):
+                source_text = clean_invisible_unicode(
+                    line.get("source_text") or line.get("text") or ""
+                ).strip()
+                method = line.get("translation_method") or line.get("cascade_stage")
+                cascade_stage = line.get("cascade_stage")
+                translated_text = line.get("display_translated_text")
+                if translated_text is None:
+                    translated_text = line.get("translated_text")
+                display_text = get_display_translation_text(
+                    source_text,
+                    translated_text,
+                    method,
+                    cascade_stage,
+                )
+                line["display_translated_text"] = display_text
+                line["translated_text"] = display_text
+                if source_text:
+                    block_source_parts.append(source_text)
+                if display_text:
+                    block_display_parts.append(display_text)
+
+            block_source = clean_invisible_unicode(
+                block.get("source_text") or block.get("original_text") or " ".join(block_source_parts)
+            )
+            block_method = block.get("translation_method") or block.get("cascade_stage")
+            block_display = block.get("display_translated_text")
+            if block_display is None:
+                block_display = block.get("translated_text")
+            display_text = get_display_translation_text(
+                block_source,
+                block_display or " ".join(block_display_parts),
+                block_method,
+                block.get("cascade_stage"),
+            )
+            block["display_translated_text"] = display_text
+            block["translated_text"] = display_text
+    return safe
 
 
 def _sha256_file(path: str) -> str:

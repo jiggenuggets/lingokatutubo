@@ -18,8 +18,11 @@ from translator.models import (
 
 from . import file_service as file_service_module
 from .models import FileType
+from .neural_translation_service import NEURAL_METHOD
 from .pipeline_service import get_pipeline_service
 from .task_runner import submit_translation_task
+from .display_utils import clean_invisible_unicode
+from .translation_display import is_display_fallback_translation
 from .translation_dataset import get_translation_dataset
 
 _CALLBACK_REGISTERED = False
@@ -187,15 +190,13 @@ def _run_translation_job(
             if isinstance(file_type, _get_file_type_enum())
             else _get_file_type_enum()(file_type)
         )
-        asyncio.run(
-            _get_pipeline_service().process_translation(
-                job_id=job_id,
-                input_file_path=input_file_path,
-                file_type=file_type_enum,
-                source_language=source_language,
-                target_language=target_language,
-                ocr_languages=ocr_languages,
-            )
+        _get_pipeline_service().process_translation(
+            job_id=job_id,
+            input_file_path=input_file_path,
+            file_type=file_type_enum,
+            source_language=source_language,
+            target_language=target_language,
+            ocr_languages=ocr_languages,
         )
     except Exception as exc:
         _fail_translation_job(job_id, str(exc))
@@ -208,6 +209,7 @@ def quick_translate_text(
     source_language: str = "auto",
     target_language: str = "tagabawa",
 ) -> Dict[str, Any]:
+    text = clean_invisible_unicode(text)
     dataset = _get_translation_dataset()
     detected_language = source_language
     detection_confidence = None
@@ -354,17 +356,33 @@ def _sync_structure_models(job_id: str, structure_path: str) -> None:
                     "translated_text": block.get("translated_text"),
                     "translation_method": block.get("translation_method"),
                     "translation_confidence": block.get("translation_confidence"),
+                    "translation_warning": block.get("translation_warning"),
                     "bbox": block.get("bbox"),
                 }
             ]
             for line in lines:
-                source_text = (line.get("source_text") or line.get("text") or "").strip()
+                source_text = clean_invisible_unicode(
+                    line.get("source_text") or line.get("text") or ""
+                ).strip()
                 if not source_text:
                     continue
-                translated_text = (line.get("translated_text") or "").strip()
+                translated_text = clean_invisible_unicode(
+                    line.get("translated_text") or ""
+                ).strip()
                 method = line.get("translation_method") or line.get("cascade_stage") or ""
                 confidence = _coerce_float(line.get("translation_confidence"))
+                warning = line.get("translation_warning") or block.get("translation_warning")
                 segment_index += 1
+                segment_metadata = {
+                    "block_id": block.get("block_id"),
+                    "ocr_confidence": line.get("ocr_confidence") or block.get("ocr_confidence"),
+                }
+                # Experimental neural output must never be saved with a
+                # fabricated confidence and always carries its review warning.
+                if method == NEURAL_METHOD:
+                    confidence = None
+                    if warning:
+                        segment_metadata["warning"] = warning
                 TranslationSegment.objects.update_or_create(
                     job=job,
                     segment_index=segment_index,
@@ -377,16 +395,15 @@ def _sync_structure_models(job_id: str, structure_path: str) -> None:
                         "method": method,
                         "confidence": confidence,
                         "needs_review": (
-                            not translated_text
-                            or translated_text == "[UNKNOWN_FOR_REVIEW]"
-                            or "UNKNOWN_FOR_REVIEW" in translated_text
-                            or method == "unknown_for_review"
+                            is_display_fallback_translation(
+                                translated_text,
+                                method,
+                                line.get("cascade_stage"),
+                            )
+                            or method == NEURAL_METHOD
                         ),
                         "bbox": line.get("bbox") or block.get("bbox") or [],
-                        "metadata": {
-                            "block_id": block.get("block_id"),
-                            "ocr_confidence": line.get("ocr_confidence") or block.get("ocr_confidence"),
-                        },
+                        "metadata": segment_metadata,
                     },
                 )
     if seen_pages:
@@ -432,7 +449,7 @@ def _sync_page_ocr(job: TranslationJob, page: DocumentPage, page_data: Dict[str,
         engine=engine,
         defaults={
             "language_codes": job.ocr_languages,
-            "text": page.extracted_text,
+            "text": clean_invisible_unicode(page.extracted_text),
             "confidence": confidence,
             "status": OCRResult.Status.PENDING_REVIEW if confidences else OCRResult.Status.ACCEPTED,
             "warnings": all_warnings,
@@ -447,7 +464,9 @@ def _page_text(page_data: Dict[str, Any]) -> str:
         if block.get("type") != "text" and block.get("block_type") != "text":
             continue
         for line in block.get("lines", []):
-            text = (line.get("source_text") or line.get("text") or "").strip()
+            text = clean_invisible_unicode(
+                line.get("source_text") or line.get("text") or ""
+            ).strip()
             if text:
                 lines.append(text)
     return "\n".join(lines)

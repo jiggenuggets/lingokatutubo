@@ -605,14 +605,14 @@
       } else {
         detailsList.innerHTML = blocks.map((block) => {
           const source = block.source_text || block.original_text || "-";
-          const translated = block.translated_text || "[UNKNOWN_FOR_REVIEW]";
+          const translated = block.display_translated_text || block.translated_text || source;
           const translatedValue = text(translated);
           const method = block.translation_method || block.cascade_stage || "unknown";
           const confidence = Number(block.translation_confidence);
           const confidenceText = Number.isFinite(confidence)
             ? `${Math.round(confidence * 100)}%`
-            : "n/a";
-          const needsReview = !translatedValue || translatedValue.includes("UNKNOWN_FOR_REVIEW");
+            : "No confidence score";
+          const needsReview = Boolean(block.needs_review);
           return `
             <article class="detail-row">
               <div>
@@ -679,6 +679,75 @@
       .catch((error) => showError(error.message || "Could not load preview."));
   }
 
+  function initPreviewLinks() {
+    const links = document.querySelectorAll(".js-preview-link");
+    if (!links.length) return;
+
+    const overlay = document.getElementById("page-transition-overlay");
+    const overlayText = document.getElementById("page-transition-text");
+    const errorBanner = document.getElementById("js-error-banner");
+    const errorBannerText = document.getElementById("js-error-banner-text");
+    const OPEN_TIMEOUT_MS = 10000;
+
+    function showOverlay(message) {
+      if (!overlay) return;
+      if (overlayText && message) overlayText.textContent = message;
+      overlay.classList.add("is-visible");
+      overlay.setAttribute("aria-hidden", "false");
+    }
+
+    function hideOverlay() {
+      if (!overlay) return;
+      overlay.classList.remove("is-visible");
+      overlay.setAttribute("aria-hidden", "true");
+    }
+
+    function showOpenFailure() {
+      if (!errorBanner || !errorBannerText) return;
+      errorBannerText.textContent = "Could not open the bilingual preview. Please try again.";
+      errorBanner.hidden = false;
+    }
+
+    links.forEach((link) => {
+      link.addEventListener("click", (event) => {
+        // Never intercept a hidden link, a link already loading, or a
+        // modified/non-primary click (new tab, new window, etc.) — those
+        // must keep their normal browser behavior.
+        if (link.hidden || link.classList.contains("is-loading")) {
+          event.preventDefault();
+          return;
+        }
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+          return;
+        }
+        const href = link.getAttribute("href");
+        if (!href || href === "#") return;
+
+        event.preventDefault();
+        const loadingText = link.dataset.loadingText || "Opening Bilingual Preview…";
+        link.dataset.originalText = link.textContent;
+        link.classList.add("is-loading");
+        link.setAttribute("aria-disabled", "true");
+        link.textContent = loadingText;
+        showOverlay(loadingText);
+
+        window.setTimeout(() => {
+          link.classList.remove("is-loading");
+          link.removeAttribute("aria-disabled");
+          link.textContent = link.dataset.originalText || loadingText;
+          hideOverlay();
+          showOpenFailure();
+        }, OPEN_TIMEOUT_MS);
+
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            window.location.href = href;
+          });
+        });
+      });
+    });
+  }
+
   function initMobileNav() {
     const hamburger = document.getElementById("nav-hamburger");
     const navLinks = document.getElementById("nav-links");
@@ -722,6 +791,7 @@
     initUpload();
     initStatusPage();
     initPreview();
+    initPreviewLinks();
     initMobileNav();
     initMessageDismiss();
   });

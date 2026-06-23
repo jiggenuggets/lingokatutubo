@@ -1,0 +1,43 @@
+{
+  "generated_at_utc": "2026-06-20T14:39:00.685789+00:00",
+  "input_csv": "datasets\\cleaned\\cross_lingual_cleaned_v1.csv",
+  "input_raw_row_count": 612,
+  "validation_report": {
+    "total_rows": 612,
+    "missing_columns": [],
+    "duplicate_record_ids": {},
+    "blank_bagobo_count": 0,
+    "blank_english_count": 0,
+    "exact_duplicate_pair_rows": [
+      "SENT-0066",
+      "SENT-0078"
+    ],
+    "copy_through_rows": [
+      "SENT-0413"
+    ],
+    "replacement_char_rows": [],
+    "usable_record_count": 610,
+    "grouping_column": null
+  },
+  "split_method": "experimental_row_split",
+  "leakage_safe": false,
+  "warning": "No source/story/chapter/paragraph grouping metadata was found in this dataset, so this is a row-level 'experimental_row_split', NOT a leakage-safe split by document or narrative. Sentences from the same story may appear in both train and test. HIGH PRIORITY: a source-based split must be constructed (e.g. by tagging each row with its narrative title) before this split is used for final thesis-level evaluation.",
+  "seed": 42,
+  "ratios": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.09999999999999995
+  },
+  "counts": {
+    "train": 487,
+    "validation": 62,
+    "test": 61
+  },
+  "record_id_overlap_check": true,
+  "schema": {
+    "record_id": "str",
+    "source_text": "str (bagobo_text)",
+    "target_text": "str (english_text)"
+  },
+  "excluded_dataset_note": "The existing ~1028-entry word/phrase dataset (translator/services/translation_data.json) is intentionally excluded from this neural training experiment and remains reserved for phrasebook/glossary lookup."
+}

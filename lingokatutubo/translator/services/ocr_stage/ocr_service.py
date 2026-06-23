@@ -14,6 +14,8 @@ import io
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from ..display_utils import safe_print
+
 
 class OCRUnavailableError(RuntimeError):
     """Raised when Tesseract / pytesseract are not usable on this system."""
@@ -295,13 +297,13 @@ class OCRService:
             if img.mode != "L":
                 img = img.convert("L")
         except Exception as e:
-            print(f"[OCR] grayscale failed: {e}")
+            safe_print(f"[OCR] grayscale failed: {e}")
             return img
 
         try:
             img = ImageOps.autocontrast(img, cutoff=2)
         except Exception as e:
-            print(f"[OCR] autocontrast failed: {e}")
+            safe_print(f"[OCR] autocontrast failed: {e}")
 
         # Conservative OTSU-style binarisation: only apply when the image is
         # very faint (mean > 180 on a 0–255 scale, meaning mostly very light
@@ -321,9 +323,9 @@ class OCRService:
                     # level while still separating text (typically <150) from bg.
                     threshold_value = int(mean_px * 0.85)
                     img = img.point(lambda px: 255 if px > threshold_value else 0)
-                    print(f"[OCR] Applied threshold (mean={mean_px:.1f}, cutoff={threshold_value})")
+                    safe_print(f"[OCR] Applied threshold (mean={mean_px:.1f}, cutoff={threshold_value})")
             except Exception as e:
-                print(f"[OCR] threshold failed: {e}")
+                safe_print(f"[OCR] threshold failed: {e}")
 
         if self.denoise_enabled:
             try:
@@ -332,7 +334,7 @@ class OCRService:
                 # already-clean text noticeably.
                 img = img.filter(ImageFilter.MedianFilter(size=3))
             except Exception as e:
-                print(f"[OCR] median denoise failed: {e}")
+                safe_print(f"[OCR] median denoise failed: {e}")
 
         return img
 
@@ -372,9 +374,9 @@ class OCRService:
             )
             if permanent:
                 self._osd_available = False
-                print(f"[OCR] OSD permanently disabled: {e}")
+                safe_print(f"[OCR] OSD permanently disabled: {e}")
             else:
-                print(f"[OCR] OSD skipped on this page: {e}")
+                safe_print(f"[OCR] OSD skipped on this page: {e}")
             return 0
 
     def _apply_rotation(self, img, rotate_deg: int):
@@ -517,7 +519,7 @@ class OCRService:
         try:
             img = self._preprocess(img)
         except Exception as e:
-            print(f"[OCR] preprocessing failed: {e}")
+            safe_print(f"[OCR] preprocessing failed: {e}")
 
         rotate_deg = self._detect_rotation_deg(img)
         img, applied_deg, rot_warning = self._apply_rotation(img, rotate_deg)
@@ -551,7 +553,7 @@ class OCRService:
                         timeout=self.timeout_seconds,
                     )
                 except Exception as retry_e:
-                    print(f"[OCR] page {page_idx + 1} failed: {retry_e}")
+                    safe_print(f"[OCR] page {page_idx + 1} failed: {retry_e}")
                     return {
                         "page": page_idx,
                         "width": page_w_pt,
@@ -560,7 +562,7 @@ class OCRService:
                         "ocr_error": f"{e}; English fallback also failed: {retry_e}",
                     }
             else:
-                print(f"[OCR] page {page_idx + 1} failed: {e}")
+                safe_print(f"[OCR] page {page_idx + 1} failed: {e}")
                 return {
                     "page": page_idx,
                     "width": page_w_pt,

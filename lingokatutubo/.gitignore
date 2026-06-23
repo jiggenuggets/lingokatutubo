@@ -66,3 +66,10 @@ uploads/
 temp/
 *.tmp
 .vercel
+
+# ML training artifacts (experimental ByT5 pipeline)
+model_artifacts/
+training_outputs/
+checkpoints/
+wandb/
+.venv-training/

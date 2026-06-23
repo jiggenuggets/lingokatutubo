@@ -134,6 +134,25 @@ LOGIN_URL = "translator:login"
 LOGIN_REDIRECT_URL = "translator:translate"
 LOGOUT_REDIRECT_URL = "translator:home"
 
+# Email — used for the password-reset workflow. Defaults to the console
+# backend so reset emails are visible in the dev server log when no SMTP
+# settings are configured. For production, set DJANGO_EMAIL_BACKEND to
+# "django.core.mail.backends.smtp.EmailBackend" and provide EMAIL_HOST,
+# EMAIL_PORT, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, EMAIL_USE_TLS, and
+# DEFAULT_FROM_EMAIL.
+EMAIL_BACKEND = os.environ.get(
+    "DJANGO_EMAIL_BACKEND",
+    "django.core.mail.backends.console.EmailBackend"
+    if DEBUG
+    else "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1").lower() in {"1", "true", "yes", "on"}
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "no-reply@lingokatutubo.local")
+
 DATA_UPLOAD_MAX_MEMORY_SIZE = 55 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 LINGOKATUTUBO_MAX_UPLOAD_BYTES = int(
@@ -145,6 +164,27 @@ LINGOKATUTUBO_TASK_TIMEOUT_SECONDS = int(
 )
 LINGOKATUTUBO_OCR_TIMEOUT_SECONDS = int(
     os.environ.get("LINGOKATUTUBO_OCR_TIMEOUT_SECONDS", "120")
+)
+
+# Experimental ByT5 Bagobo-Tagabawa -> English neural fallback.
+# DISABLED by default. When enabled, it is consulted only for segments the
+# phrasebook/dataset cascade could not translate, and only for the
+# configured source -> target direction. Every neural output is marked
+# needs_review. Requires the optional torch/transformers stack and the model
+# files to be present; if either is missing the pipeline falls back to the
+# phrasebook.
+LINGOKATUTUBO_NEURAL_TRANSLATION_ENABLED = os.environ.get(
+    "LINGOKATUTUBO_NEURAL_TRANSLATION_ENABLED", "0"
+).lower() in {"1", "true", "yes", "on"}
+LINGOKATUTUBO_BYT5_MODEL_DIR = os.environ.get(
+    "LINGOKATUTUBO_BYT5_MODEL_DIR",
+    str(BASE_DIR / "model_artifacts" / "byt5_tagabawa_english_full_v1"),
+)
+LINGOKATUTUBO_BYT5_SOURCE_LANGUAGE = os.environ.get(
+    "LINGOKATUTUBO_BYT5_SOURCE_LANGUAGE", "tagabawa"
+)
+LINGOKATUTUBO_BYT5_TARGET_LANGUAGE = os.environ.get(
+    "LINGOKATUTUBO_BYT5_TARGET_LANGUAGE", "english"
 )
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")

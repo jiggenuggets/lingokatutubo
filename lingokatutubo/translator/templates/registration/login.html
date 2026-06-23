@@ -2,11 +2,20 @@
 
 {% block title %}Log In{% endblock %}
 
+{% block nav_links %}
+  <a href="{% url 'translator:home' %}" role="menuitem">Home</a>
+{% endblock %}
+
 {% block content %}
 <main class="auth-page">
   <form class="auth-panel" method="post">
     {% csrf_token %}
-    <h1>Log In</h1>
+    {% if next_is_translate %}
+      <h1>Log in to continue</h1>
+      <p class="page-subtitle">Sign in to access document translation.</p>
+    {% else %}
+      <h1>Log In</h1>
+    {% endif %}
     {{ form.non_field_errors }}
     <label>
       <span>Username</span>
@@ -19,6 +28,7 @@
       {{ form.password.errors }}
     </label>
     <button class="button primary full" type="submit">Log In</button>
+    <p><a class="button-link" href="{% url 'password_reset' %}">Forgot Password?</a></p>
     <p>Need an account? <a href="{% url 'translator:signup' %}">Sign up</a>.</p>
   </form>
 </main>

@@ -20,6 +20,8 @@ import re
 import unicodedata
 from typing import Dict, List, Optional
 
+from .display_utils import clean_invisible_unicode, safe_print
+
 SUPPORTED_LANGS = ["english", "tagabawa", "filipino", "cebuano"]
 UNKNOWN_FOR_REVIEW = "[UNKNOWN_FOR_REVIEW]"
 
@@ -77,7 +79,7 @@ def _normalize_column(header: str) -> Optional[str]:
 
 
 def _normalize_alias_key(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower().replace("_", " "))
+    return re.sub(r"\s+", " ", clean_invisible_unicode(value).strip().lower().replace("_", " "))
 
 
 def _strip_diacritics(value: str) -> str:
@@ -89,7 +91,7 @@ def _strip_diacritics(value: str) -> str:
 
 
 def _normalize_lookup_text(value: str, *, strip_diacritics: bool = False) -> str:
-    text = str(value or "").strip().lower()
+    text = clean_invisible_unicode(value).strip().lower()
     if strip_diacritics:
         text = _strip_diacritics(text)
     text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
@@ -98,7 +100,7 @@ def _normalize_lookup_text(value: str, *, strip_diacritics: bool = False) -> str
 
 
 def _lookup_variants(value: str) -> List[str]:
-    raw = str(value or "").strip().lower()
+    raw = clean_invisible_unicode(value).strip().lower()
     variants = [
         raw,
         _normalize_lookup_text(value),
@@ -147,7 +149,7 @@ class TranslationDataset:
         # --- Attempt 1: JSON (the configured path) ---
         json_loaded = False
         if os.path.exists(self.dataset_path):
-            print(f"[Translation] Loading dataset from: {self.dataset_path}")
+            safe_print(f"[Translation] Loading dataset from: {self.dataset_path}")
             try:
                 with open(self.dataset_path, "r", encoding="utf-8-sig") as f:
                     raw = json.load(f)
@@ -183,9 +185,9 @@ class TranslationDataset:
                     json_loaded = True
 
             except Exception as exc:
-                print(f"[Translation] Error loading JSON dataset: {exc}")
+                safe_print(f"[Translation] Error loading JSON dataset: {exc}")
         else:
-            print(f"[Translation] ERROR: Dataset file not found at {self.dataset_path}")
+            safe_print(f"[Translation] ERROR: Dataset file not found at {self.dataset_path}")
 
         # --- Attempt 2: Scan backend directory for CSV/Excel ---
         if not json_loaded:
@@ -203,7 +205,7 @@ class TranslationDataset:
 
         # --- Common outcome ---
         if not self.data:
-            print(
+            safe_print(
                 "[Translation] Dataset file has no phrase rows yet. "
                 "Add a 'rows' array to translation_data.json, or place a "
                 "translation_data.csv / phrasebook.csv in the backend folder."
@@ -212,13 +214,13 @@ class TranslationDataset:
 
         self._build_all_indices()
         self.is_loaded = True
-        print(f"[Translation] Dataset loaded: {len(self.data)} entries")
-        print("[Translation] Sample translations (first 5):")
+        safe_print(f"[Translation] Dataset loaded: {len(self.data)} entries")
+        safe_print("[Translation] Sample translations (first 5):")
         for i, row in enumerate(self.data[:5]):
             en = row.get("english_source", "")
             tg = row.get("tagabawa_source", "")
             fi = row.get("filipino_source", "")
-            print(f"  [{i+1}] en={en!r}  tagabawa={tg!r}  filipino={fi!r}")
+            safe_print(f"  [{i+1}] en={en!r}  tagabawa={tg!r}  filipino={fi!r}")
 
     # ------------------------------------------------------------------
     # File discovery
@@ -257,12 +259,12 @@ class TranslationDataset:
     def _load_csv(self, path: str) -> List[Dict]:
         """Load phrase rows from a CSV file. Returns list of row dicts or []."""
         rows = []
-        print(f"[Translation] Loading dataset from: {path}")
+        safe_print(f"[Translation] Loading dataset from: {path}")
         try:
             with open(path, "r", encoding="utf-8-sig", newline="") as f:
                 reader = _csv.DictReader(f)
                 if reader.fieldnames is None:
-                    print(f"[Translation] ERROR: CSV has no header row: {path}")
+                    safe_print(f"[Translation] ERROR: CSV has no header row: {path}")
                     return []
 
                 # Build column map: csv_header -> canonical_key
@@ -273,9 +275,9 @@ class TranslationDataset:
                         col_map[h] = canonical
 
                 if not col_map:
-                    print(f"[Translation] ERROR: No recognized language columns in CSV: {path}")
-                    print(f"[Translation] Found headers: {list(reader.fieldnames)}")
-                    print("[Translation] Expected headers like: tagabawa, english, filipino, cebuano")
+                    safe_print(f"[Translation] ERROR: No recognized language columns in CSV: {path}")
+                    safe_print(f"[Translation] Found headers: {list(reader.fieldnames)}")
+                    safe_print("[Translation] Expected headers like: tagabawa, english, filipino, cebuano")
                     return []
 
                 for raw_row in reader:
@@ -287,7 +289,7 @@ class TranslationDataset:
                         rows.append(row)
 
         except Exception as exc:
-            print(f"[Translation] ERROR loading CSV {path}: {exc}")
+            safe_print(f"[Translation] ERROR loading CSV {path}: {exc}")
         return rows
 
     # ------------------------------------------------------------------
@@ -330,7 +332,7 @@ class TranslationDataset:
     def _load_excel(self, path: str) -> List[Dict]:
         """Load phrase rows from an .xlsx file. Returns list of row dicts or []."""
         rows = []
-        print(f"[Translation] Loading dataset from: {path}")
+        safe_print(f"[Translation] Loading dataset from: {path}")
         try:
             import openpyxl  # type: ignore
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -348,9 +350,9 @@ class TranslationDataset:
                     col_map[idx] = canonical
 
             if not col_map:
-                print(f"[Translation] ERROR: No recognized language columns in Excel: {path}")
-                print(f"[Translation] Found headers: {raw_headers}")
-                print("[Translation] Expected headers like: tagabawa, english, filipino, cebuano")
+                safe_print(f"[Translation] ERROR: No recognized language columns in Excel: {path}")
+                safe_print(f"[Translation] Found headers: {raw_headers}")
+                safe_print("[Translation] Expected headers like: tagabawa, english, filipino, cebuano")
                 wb.close()
                 return []
 
@@ -364,9 +366,9 @@ class TranslationDataset:
 
             wb.close()
         except ImportError:
-            print("[Translation] ERROR: openpyxl not installed. Run: pip install openpyxl>=3.1.0")
+            safe_print("[Translation] ERROR: openpyxl not installed. Run: pip install openpyxl>=3.1.0")
         except Exception as exc:
-            print(f"[Translation] ERROR loading Excel {path}: {exc}")
+            safe_print(f"[Translation] ERROR loading Excel {path}: {exc}")
         return rows
 
     # ------------------------------------------------------------------

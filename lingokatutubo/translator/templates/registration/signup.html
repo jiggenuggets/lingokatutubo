@@ -2,6 +2,10 @@
 
 {% block title %}Sign Up{% endblock %}
 
+{% block nav_links %}
+  <a href="{% url 'translator:home' %}" role="menuitem">Home</a>
+{% endblock %}
+
 {% block content %}
 <main class="auth-page">
   <form class="auth-panel" method="post">
