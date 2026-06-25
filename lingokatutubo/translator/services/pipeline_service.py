@@ -647,6 +647,11 @@ class PipelineService:
                         "method": translation_meta.get("method", "unknown"),
                         "cascade_stage": translation_meta.get("cascade_stage", translation_meta.get("method", "unknown")),
                         "confidence": translation_meta.get("confidence"),
+                        "needs_review": (
+                            bool(translation_meta.get("needs_review"))
+                            or self._is_unmatched(translation_meta)
+                            or translation_meta.get("method") == NEURAL_METHOD
+                        ),
                         "warning": translation_meta.get("warning"),
                         "source_language": source_lang,
                         "target_language": target_lang,
@@ -692,9 +697,21 @@ class PipelineService:
 
             service = get_neural_translation_service()
             if not service.is_enabled():
+                safe_print(
+                    f"[Pipeline] ByT5 fallback skipped: disabled "
+                    f"source={source_lang} target={target_lang}"
+                )
                 return None
 
+            safe_print(
+                f"[Pipeline] ByT5 fallback called: "
+                f"source={source_lang} target={target_lang}"
+            )
             result = service.translate_unmatched(original, source_lang, target_lang)
+            safe_print(
+                "[Pipeline] ByT5 fallback result: "
+                + ("produced review-only output" if result else "no output")
+            )
 
             # Surface a load/availability warning once so the operator can see
             # why neural output did not appear, without crashing the job.
@@ -766,25 +783,21 @@ class PipelineService:
 
     @staticmethod
     def _extract_txt_text_and_layout(txt_path: str) -> List[Dict[str, Any]]:
-        """Represent a UTF-8 text file as one simple page of paragraph lines."""
+        """Represent a UTF-8 text file as one simple page of text lines."""
         with open(txt_path, "r", encoding="utf-8") as handle:
             text = clean_invisible_unicode(handle.read())
 
-        paragraphs = [
-            paragraph.strip()
-            for paragraph in re.split(r"\n\s*\n", text)
-            if paragraph.strip()
-        ]
-        if not paragraphs and text.strip():
-            paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+        text_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not text_lines and text.strip():
+            text_lines = [text.strip()]
 
         y = 72.0
         lines = []
-        for index, paragraph in enumerate(paragraphs):
-            height = max(24.0, min(120.0, 16.0 + len(paragraph) / 4.0))
+        for index, text_line in enumerate(text_lines):
+            height = max(24.0, min(120.0, 16.0 + len(text_line) / 4.0))
             lines.append(
                 {
-                    "text": paragraph,
+                    "text": text_line,
                     "bbox": [72.0, y, 540.0, y + height],
                     "font": "helv",
                     "size": 12,
@@ -1046,6 +1059,7 @@ class PipelineService:
                     line_methods: List[str] = []
                     line_confidences: List[float] = []
                     block_warning: Optional[str] = None
+                    block_needs_review = False
 
                     for line_idx, line in enumerate(block.get("lines", [])):
                         source_text = clean_invisible_unicode(line.get("text") or "").strip()
@@ -1062,6 +1076,7 @@ class PipelineService:
                             line["cascade_stage"] = None
                             line["translation_confidence"] = None
                             line["translation_warning"] = None
+                            line["needs_review"] = False
                             continue
 
                         method = record.get("method")
@@ -1075,12 +1090,22 @@ class PipelineService:
                         )
                         confidence = record.get("confidence")
                         warning = record.get("warning")
+                        needs_review = (
+                            bool(record.get("needs_review"))
+                            or is_display_fallback_translation(
+                                translated,
+                                method,
+                                cascade_stage,
+                            )
+                            or method == NEURAL_METHOD
+                        )
                         line["translated_text"] = translated
                         line["display_translated_text"] = display_translated
                         line["translation_method"] = method
                         line["cascade_stage"] = cascade_stage
                         line["translation_confidence"] = confidence
                         line["translation_warning"] = warning
+                        line["needs_review"] = needs_review
 
                         if display_translated:
                             line_translations.append(str(display_translated))
@@ -1090,6 +1115,7 @@ class PipelineService:
                             line_confidences.append(float(confidence))
                         if warning and block_warning is None:
                             block_warning = warning
+                        block_needs_review = block_needs_review or needs_review
 
                     block["translated_text"] = " ".join(line_translations).strip() or None
                     block["translation_method"] = (
@@ -1104,6 +1130,7 @@ class PipelineService:
                         else None
                     )
                     block["translation_warning"] = block_warning
+                    block["needs_review"] = block_needs_review
 
             with open(structure_path, "w", encoding="utf-8") as f:
                 json.dump(structure, f, ensure_ascii=False, indent=2)

@@ -221,18 +221,21 @@ def quick_translate_text(
         detected_language = detection["language"]
         detection_confidence = detection["confidence"]
 
-    translated = dataset.translate_phrase(
+    translation_meta = dataset.translate_phrase_with_metadata(
         text,
         source_lang=detected_language,
         target_lang=target_language,
     )
     return {
         "original": text,
-        "translated": translated,
+        "translated": translation_meta["translated"],
         "source_language": detected_language,
         "target_language": target_language,
         "dataset_loaded": dataset.is_loaded,
         "detection_confidence": detection_confidence,
+        "method": translation_meta.get("method"),
+        "confidence": translation_meta.get("confidence"),
+        "needs_review": translation_meta.get("needs_review", False),
     }
 
 

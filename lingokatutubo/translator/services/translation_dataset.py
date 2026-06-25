@@ -8,8 +8,10 @@ enough to claim high-accuracy neural translation by itself.
 
 Loads from (in priority order):
   1. translation_data.json  (utf-8-sig to handle BOM)
-  2. Any .csv file in the same directory
-  3. Any .xlsx file in the same directory
+  2. datasets/cleaned/cross_lingual_cleaned_v1.csv for the default runtime
+     dataset only
+  3. Any .csv file in the same directory if JSON is unavailable
+  4. Any .xlsx file in the same directory if JSON/CSV is unavailable
 """
 
 import csv as _csv
@@ -48,16 +50,25 @@ _LANG_ALIASES = {
 # --- Column normalization for CSV/Excel loaders ---
 _COL_ALIASES = {
     "tagalog": "filipino_source",
+    "tagalog text": "filipino_source",
+    "tagalog source": "filipino_source",
     "bagobo": "tagabawa_source",
+    "bagobo text": "tagabawa_source",
+    "bagobo source": "tagabawa_source",
     "bagobo-tagabawa": "tagabawa_source",
     "bagobo_tagabawa": "tagabawa_source",
     "bagobo tagabawa": "tagabawa_source",
+    "bagobo tagabawa text": "tagabawa_source",
     "bgs": "tagabawa_source",
     "en": "english_source",
     "eng": "english_source",
+    "english text": "english_source",
+    "english source": "english_source",
     "fil": "filipino_source",
     "tgl": "filipino_source",
     "ceb": "cebuano_source",
+    "cebuano text": "cebuano_source",
+    "cebuano source": "cebuano_source",
     "bisaya": "cebuano_source",
     "visayan": "cebuano_source",
 }
@@ -116,7 +127,18 @@ def _lookup_variants(value: str) -> List[str]:
 class TranslationDataset:
     """Manages cross-lingual phrase lookups from the multilingual phrasebook."""
 
-    def __init__(self, dataset_path: Optional[str] = None):
+    def __init__(
+        self,
+        dataset_path: Optional[str] = None,
+        include_default_corpus: Optional[bool] = None,
+    ):
+        default_runtime_dataset = dataset_path is None
+        self.include_default_corpus = (
+            default_runtime_dataset
+            if include_default_corpus is None
+            else bool(include_default_corpus)
+        )
+
         if dataset_path is None:
             base = os.path.dirname(__file__)
             candidates = [
@@ -134,8 +156,6 @@ class TranslationDataset:
 
         # Per-language indices: lang -> normalized_text -> [rows]
         self._phrase_indices: Dict[str, Dict[str, List[Dict]]] = {}
-        # Per-language word indices: lang -> word -> [rows]
-        self._word_indices: Dict[str, Dict[str, List[Dict]]] = {}
 
         self.is_loaded = False
 
@@ -203,6 +223,9 @@ class TranslationDataset:
                     self.data = self._normalize_rows(self.data)
                     break
 
+        if self.include_default_corpus:
+            self._load_default_text_corpus()
+
         # --- Common outcome ---
         if not self.data:
             safe_print(
@@ -215,12 +238,55 @@ class TranslationDataset:
         self._build_all_indices()
         self.is_loaded = True
         safe_print(f"[Translation] Dataset loaded: {len(self.data)} entries")
+        sample_lang = next(
+            (lang for lang in SUPPORTED_LANGS if self._phrase_indices.get(lang)),
+            "",
+        )
+        sample_key = (
+            next(iter(self._phrase_indices[sample_lang]))
+            if sample_lang
+            else ""
+        )
+        if sample_key:
+            safe_print(
+                f"[Translation] Sample normalized key ({sample_lang}): {sample_key!r}"
+            )
         safe_print("[Translation] Sample translations (first 5):")
         for i, row in enumerate(self.data[:5]):
             en = row.get("english_source", "")
             tg = row.get("tagabawa_source", "")
             fi = row.get("filipino_source", "")
             safe_print(f"  [{i+1}] en={en!r}  tagabawa={tg!r}  filipino={fi!r}")
+
+    def _load_default_text_corpus(self) -> None:
+        """Append the prepared cleaned text corpus to the runtime phrasebook.
+
+        Explicit dataset_path callers, such as tests and training export
+        scripts, stay isolated unless they opt in via include_default_corpus.
+        """
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        corpus_path = os.path.join(
+            project_root,
+            "datasets",
+            "cleaned",
+            "cross_lingual_cleaned_v1.csv",
+        )
+        if not os.path.exists(corpus_path):
+            safe_print(f"[Translation] Text corpus not found at: {corpus_path}")
+            return
+
+        rows = self._normalize_rows(self._load_csv(corpus_path))
+        for row in rows:
+            row.setdefault("source", "text_corpus")
+            row.setdefault("dataset_role", "text_corpus_translation_memory")
+
+        if rows:
+            self.data.extend(rows)
+        safe_print(
+            f"[Translation] Text corpus loaded: {len(rows)} entries from {corpus_path}"
+        )
 
     # ------------------------------------------------------------------
     # File discovery
@@ -282,9 +348,15 @@ class TranslationDataset:
 
                 for raw_row in reader:
                     row = {}
-                    for csv_col, canonical_key in col_map.items():
-                        val = (raw_row.get(csv_col) or "").strip()
-                        row[canonical_key] = val
+                    for csv_col, raw_value in raw_row.items():
+                        val = (raw_value or "").strip()
+                        canonical_key = col_map.get(csv_col)
+                        if canonical_key:
+                            row[canonical_key] = val
+                            continue
+                        meta_key = _normalize_alias_key(csv_col).replace(" ", "_")
+                        if meta_key in {"id", "record_id", "topic", "source", "notes"}:
+                            row[meta_key] = val
                     if any(row.values()):
                         rows.append(row)
 
@@ -377,7 +449,6 @@ class TranslationDataset:
 
     def _build_all_indices(self):
         self._phrase_indices = {lang: {} for lang in SUPPORTED_LANGS}
-        self._word_indices = {lang: {} for lang in SUPPORTED_LANGS}
 
         for row in self.data:
             for lang in SUPPORTED_LANGS:
@@ -388,10 +459,6 @@ class TranslationDataset:
                 # Phrase index
                 for norm in _lookup_variants(text):
                     self._phrase_indices[lang].setdefault(norm, []).append(row)
-
-                # Word index
-                for word in re.findall(r"\b\w+\b", _normalize_lookup_text(text, strip_diacritics=True)):
-                    self._word_indices[lang].setdefault(word, []).append(row)
 
     # ------------------------------------------------------------------
     # Translation
@@ -404,7 +471,7 @@ class TranslationDataset:
         target_lang: str = "tagabawa",
     ) -> str:
         """
-        Translate text using: exact match -> fuzzy match -> word-by-word.
+        Translate text using exact/normalized dataset matches only.
         Returns original text if no translation is found.
         """
         return self.translate_phrase_with_metadata(
@@ -427,115 +494,57 @@ class TranslationDataset:
               translated,
               method,
               cascade_stage,
-              confidence
+              confidence,
+              needs_review
             }
         """
-        original = text.strip()
-        if not self.is_loaded or not text.strip():
-            return _translation_result(UNKNOWN_FOR_REVIEW, "unknown_for_review", 0.0)
+        original = clean_invisible_unicode(text).strip()
+        if not self.is_loaded or not original:
+            self._log_lookup("unknown_for_review", source_lang, target_lang, False)
+            return _translation_result(original, "unknown_for_review", 0.0, True)
 
         # Normalize language aliases
         source_lang = _normalize_lang(source_lang)
         target_lang = _normalize_lang(target_lang)
 
         if source_lang == target_lang:
+            self._log_lookup("identity", source_lang, target_lang, True)
             return _translation_result(text, "identity", 1.0)
 
         target_key = f"{target_lang}_source"
         src_index = self._phrase_indices.get(source_lang, {})
 
-        # 1. Exact match
-        for norm in _lookup_variants(original):
+        # 1. Exact/normalized dataset match. The first variant is the cleaned
+        # raw text; later variants are punctuation/case/diacritic tolerant.
+        for variant_index, norm in enumerate(_lookup_variants(original)):
             result = _first_result(src_index.get(norm, []), target_key)
             if result:
+                method = "exact_phrase" if variant_index == 0 else "normalized_phrase"
+                self._log_lookup(method, source_lang, target_lang, True, key=norm)
                 return _translation_result(
                     _preserve_case(original, result),
-                    "exact_phrase",
+                    method,
                     1.0,
                 )
 
-        # 2. Fuzzy match (rapidfuzz)
-        fuzzy = self._fuzzy_match(
-            _normalize_lookup_text(original, strip_diacritics=True),
-            src_index,
-            target_key,
+        self._log_lookup("unknown_for_review", source_lang, target_lang, False)
+        return _translation_result(original, "unknown_for_review", 0.0, True)
+
+    @staticmethod
+    def _log_lookup(
+        stage: str,
+        source_lang: str,
+        target_lang: str,
+        matched: bool,
+        *,
+        key: str = "",
+    ) -> None:
+        status = "matched" if matched else "missed"
+        suffix = f" key={key!r}" if key else ""
+        safe_print(
+            f"[Translation] Lookup {status}: source={source_lang} "
+            f"target={target_lang} stage={stage}{suffix}"
         )
-        result = fuzzy["translated"] if fuzzy else None
-        if result:
-            return _translation_result(
-                _preserve_case(original, result),
-                "fuzzy_phrase",
-                fuzzy["score"] / 100.0,
-            )
-
-        # 3. Word-by-word fallback
-        word_result = self._translate_words(original, source_lang, target_lang)
-        if word_result != original:
-            return _translation_result(word_result, "word_by_word", 0.55)
-        return _translation_result(UNKNOWN_FOR_REVIEW, "unknown_for_review", 0.0)
-
-    def _fuzzy_match(
-        self,
-        query: str,
-        src_index: Dict[str, List[Dict]],
-        target_key: str,
-        threshold: int = 82,
-    ) -> Optional[Dict]:
-        if not src_index:
-            return None
-        try:
-            from rapidfuzz import process as rfp, fuzz  # type: ignore
-            match = rfp.extractOne(
-                query, list(src_index.keys()), scorer=fuzz.ratio
-            )
-            if match and match[1] >= threshold:
-                translated = _first_result(src_index[match[0]], target_key)
-                if translated:
-                    return {"translated": translated, "score": float(match[1])}
-        except ImportError:
-            pass
-        return None
-
-    def _translate_words(
-        self, text: str, source_lang: str, target_lang: str
-    ) -> str:
-        if not text.strip():
-            return text
-
-        leading = len(text) - len(text.lstrip())
-        trailing = len(text) - len(text.rstrip())
-        content = text.strip()
-
-        # Preserve list prefixes (1. / a. / * etc.)
-        prefix = ""
-        m = re.match(r"^(\d+[.)]\s*|\w[.)]\s*|[*\-]\s+)", content)
-        if m:
-            prefix = m.group(0)
-            content = content[len(prefix):]
-
-        target_key = f"{target_lang}_source"
-        word_idx = self._word_indices.get(source_lang, {})
-
-        parts = re.split(r"(\s+|[,.\-;:!?])", content)
-        translated: List[str] = []
-
-        for part in parts:
-            if not part:
-                continue
-            if re.match(r"^[\s,.\-;:!?]+$", part):
-                translated.append(part)
-                continue
-
-            clean = _normalize_lookup_text(part, strip_diacritics=True)
-            t = _first_result(word_idx.get(clean, []), target_key)
-            if t:
-                word = t.strip().split()[0]
-                translated.append(_preserve_case(part, word))
-            else:
-                translated.append(part)
-
-        result = prefix + "".join(translated)
-        return " " * leading + result + " " * trailing
 
     # ------------------------------------------------------------------
     # Quick helpers used by the API
@@ -544,13 +553,16 @@ class TranslationDataset:
     def translate_quick(
         self, text: str, source_lang: str = "english", target_lang: str = "tagabawa"
     ) -> Dict:
-        translated = self.translate_phrase(text, source_lang, target_lang)
+        result = self.translate_phrase_with_metadata(text, source_lang, target_lang)
         return {
             "original": text,
-            "translated": translated,
+            "translated": result["translated"],
             "source_language": source_lang,
             "target_language": target_lang,
             "dataset_loaded": self.is_loaded,
+            "method": result["method"],
+            "confidence": result["confidence"],
+            "needs_review": result.get("needs_review", False),
         }
 
 
@@ -578,12 +590,20 @@ def _first_result(rows: List[Dict], key: str) -> Optional[str]:
     return None
 
 
-def _translation_result(translated: str, method: str, confidence: float) -> Dict:
+def _translation_result(
+    translated: str,
+    method: str,
+    confidence: float,
+    needs_review: Optional[bool] = None,
+) -> Dict:
+    if needs_review is None:
+        needs_review = method in {"unknown_for_review", "untranslated_needs_review"}
     return {
         "translated": translated,
         "method": method,
         "cascade_stage": method,
         "confidence": round(max(0.0, min(1.0, float(confidence))), 4),
+        "needs_review": bool(needs_review),
     }
 
 

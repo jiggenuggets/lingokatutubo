@@ -3,6 +3,7 @@ import json
 import os
 import re
 import copy
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.views.csrf import csrf_failure as _django_csrf_failure
 from django.views.decorators.http import require_http_methods, require_POST
 
 from .forms import DocumentUploadForm, SignUpForm
@@ -53,6 +55,61 @@ PREVIEW_IMAGE_NAME_RE = re.compile(r"^(?:original|translated)_page_\d+\.png$")
 GENERIC_TRANSLATION_FAILURE_MESSAGE = (
     "Translation could not be completed. Please try another file or contact the administrator."
 )
+
+# Path prefixes the frontend only ever talks to via fetch() + response.json().
+# Auth/CSRF/permission failures on these must stay JSON — a redirect or an
+# HTML error page here breaks response.json() with "Unexpected token '<'".
+JSON_API_PATH_PREFIXES = (
+    "/translate/upload/",
+    "/translate/status/",
+    "/translate/structure/",
+    "/translate/preview-data/",
+    "/api/",
+)
+
+
+def csrf_failure(request, reason=""):
+    """CSRF failure handler (see CSRF_FAILURE_VIEW in settings.py).
+
+    JSON API routes get a JSON body so fetch() callers can show a clean
+    message instead of failing to parse Django's HTML CSRF error page.
+    Normal HTML form posts (login, signup, delete-confirm) keep Django's
+    default CSRF error page unchanged.
+    """
+    if request.path.startswith(JSON_API_PATH_PREFIXES):
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "Your session expired. Please refresh the page and try again.",
+            },
+            status=403,
+        )
+    return _django_csrf_failure(request, reason=reason)
+
+
+def api_login_required(view_func):
+    """Like @login_required, but for JSON API endpoints.
+
+    @login_required redirects to the HTML login page; fetch() follows that
+    redirect automatically and ends up handing response.json() an HTML
+    document, which throws "Unexpected token '<'". API routes need a JSON
+    body instead so the frontend can show a clean message.
+    """
+
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": "Please log in again to continue.",
+                    "redirect_url": reverse("translator:login"),
+                },
+                status=401,
+            )
+        return view_func(request, *args, **kwargs)
+
+    return wrapped
 
 
 def home(request):
@@ -304,7 +361,7 @@ def preview(request, job_id):
     )
 
 
-@login_required
+@api_login_required
 @require_POST
 def api_translate(request):
     # 1. Active jobs limit check (Maximum 2 queued/processing jobs per user)
@@ -346,77 +403,98 @@ def api_translate(request):
     if not file_type:
         return JsonResponse({"detail": "Unsupported file type."}, status=400)
 
-    job = TranslationJob.objects.create(
-        owner=request.user,
-        original_filename=uploaded.name,
-        file_type=file_type,
-        source_language=form.cleaned_data["source_language"],
-        target_language=form.cleaned_data["target_language"],
-        ocr_languages=form.cleaned_data.get("ocr_languages", ""),
-        phase_message="Document is waiting to be processed.",
-    )
+    job = None
+    try:
+        job = TranslationJob.objects.create(
+            owner=request.user,
+            original_filename=uploaded.name,
+            file_type=file_type,
+            source_language=form.cleaned_data["source_language"],
+            target_language=form.cleaned_data["target_language"],
+            ocr_languages=form.cleaned_data.get("ocr_languages", ""),
+            phase_message="Document is waiting to be processed.",
+        )
 
-    stored_paths = save_uploaded_file(uploaded, job.job_id)
+        stored_paths = save_uploaded_file(uploaded, job.job_id)
 
-    job.input_file_path = stored_paths["input_file_path"]
-    job.upload_file_path = stored_paths["upload_file_path"]
-    job.save(update_fields=["input_file_path", "upload_file_path", "updated_at"])
+        job.input_file_path = stored_paths["input_file_path"]
+        job.upload_file_path = stored_paths["upload_file_path"]
+        job.save(update_fields=["input_file_path", "upload_file_path", "updated_at"])
 
-    UploadedDocument.objects.create(
-        owner=request.user,
-        job=job,
-        original_filename=uploaded.name,
-        file_type=file_type,
-        file_path=stored_paths["upload_file_path"],
-        file_size_bytes=uploaded.size,
-        checksum_sha256=_sha256_file(stored_paths["upload_file_path"]),
-        metadata={
-            "content_type": getattr(uploaded, "content_type", ""),
-            "source_language": job.source_language,
-            "target_language": job.target_language,
-        },
-    )
+        UploadedDocument.objects.create(
+            owner=request.user,
+            job=job,
+            original_filename=uploaded.name,
+            file_type=file_type,
+            file_path=stored_paths["upload_file_path"],
+            file_size_bytes=uploaded.size,
+            checksum_sha256=_sha256_file(stored_paths["upload_file_path"]),
+            metadata={
+                "content_type": getattr(uploaded, "content_type", ""),
+                "source_language": job.source_language,
+                "target_language": job.target_language,
+            },
+        )
 
-    job.metadata = {
-        **(job.metadata or {}),
-        "original_content_type": getattr(uploaded, "content_type", ""),
-        "original_file_size_bytes": uploaded.size,
-    }
-    job.save(update_fields=["metadata", "updated_at"])
+        job.metadata = {
+            **(job.metadata or {}),
+            "original_content_type": getattr(uploaded, "content_type", ""),
+            "original_file_size_bytes": uploaded.size,
+        }
+        job.save(update_fields=["metadata", "updated_at"])
 
-    UserActivityLog.objects.create(
-        user=request.user,
-        action="upload_document",
-        object_type="TranslationJob",
-        object_id=job.job_id,
-        metadata={"filename": uploaded.name, "file_type": file_type},
-    )
+        UserActivityLog.objects.create(
+            user=request.user,
+            action="upload_document",
+            object_type="TranslationJob",
+            object_id=job.job_id,
+            metadata={"filename": uploaded.name, "file_type": file_type},
+        )
 
-    SystemEventLog.objects.create(
-        actor=request.user,
-        job=job,
-        event_type="translation_job_created",
-        message="Translation job created from document upload.",
-        metadata={"filename": uploaded.name, "file_type": file_type},
-    )
+        SystemEventLog.objects.create(
+            actor=request.user,
+            job=job,
+            event_type="translation_job_created",
+            message="Translation job created from document upload.",
+            metadata={"filename": uploaded.name, "file_type": file_type},
+        )
 
-    start_translation_job(job)
+        start_translation_job(job)
 
-    payload = _job_payload(job)
-    payload["message"] = "Translation started"
+        payload = _job_payload(job)
+        payload["message"] = "Translation started"
 
-    return JsonResponse(payload, status=202)
+        return JsonResponse(payload, status=202)
+    except Exception as exc:
+        SystemEventLog.objects.create(
+            actor=request.user,
+            job=job,
+            level=SystemEventLog.Level.ERROR,
+            event_type="upload_request_failed",
+            message=f"Upload request failed: {exc}",
+            metadata={"filename": uploaded.name},
+        )
+        error_payload = {"ok": False, "error": GENERIC_TRANSLATION_FAILURE_MESSAGE}
+        if request.user.is_staff:
+            error_payload["technical_detail"] = str(exc)
+        return JsonResponse(error_payload, status=500)
 
 
-@login_required
+@api_login_required
 def api_job_status(request, job_id):
-    job = _get_owned_job(request, job_id)
+    try:
+        job = _get_owned_job(request, job_id)
+    except Http404:
+        return JsonResponse({"ok": False, "error": "Job not found."}, status=404)
     return JsonResponse(_job_payload(job))
 
 
-@login_required
+@api_login_required
 def api_structure(request, job_id):
-    job = _get_owned_job(request, job_id)
+    try:
+        job = _get_owned_job(request, job_id)
+    except Http404:
+        return JsonResponse({"ok": False, "error": "Job not found."}, status=404)
 
     structure_path = _resolve_job_file(
         job,
@@ -447,9 +525,12 @@ def api_structure(request, job_id):
     return JsonResponse(data)
 
 
-@login_required
+@api_login_required
 def api_preview(request, job_id):
-    job = _get_owned_job(request, job_id)
+    try:
+        job = _get_owned_job(request, job_id)
+    except Http404:
+        return JsonResponse({"ok": False, "error": "Job not found."}, status=404)
 
     if job.status != TranslationJob.Status.COMPLETED:
         return JsonResponse(

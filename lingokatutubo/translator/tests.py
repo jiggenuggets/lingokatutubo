@@ -1294,8 +1294,15 @@ class TranslatorPhase4SystemTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_upload_requires_login(self):
+        # Must be a JSON 401, not an HTML redirect: fetch() in app.js follows
+        # redirects automatically and ends up handing response.json() the
+        # login page's HTML, which throws "Unexpected token '<'".
         response = self.client.post(reverse("translator:upload"))
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response["Content-Type"], "application/json")
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["redirect_url"], reverse("translator:login"))
 
     def test_upload_csrf_required(self):
         from django.test import Client
@@ -1305,6 +1312,10 @@ class TranslatorPhase4SystemTests(TestCase):
         csrf_client.get(reverse("translator:translate"))
         response = csrf_client.post(reverse("translator:upload"), {"file": "dummy"})
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(response["Content-Type"], "application/json")
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("error", data)
 
     def test_upload_rate_limit_blocks_excess_requests(self):
         self.client.force_login(self.alice)
@@ -3915,11 +3926,18 @@ class AppendixAAuthTests(TestCase):
         response = self.client.get(url)
         self.assertRedirects(response, f"{reverse('translator:login')}?next={url}")
 
-    def test_tc6_unauthenticated_upload_api_redirects(self):
-        """TC-6: Upload API redirects an unauthenticated POST to login."""
+    def test_tc6_unauthenticated_upload_api_returns_json_not_redirect(self):
+        """TC-6 (revised): the upload API is a fetch()+response.json() JSON
+        endpoint, not a page navigation. An HTML redirect here makes fetch()
+        follow it and hand response.json() the login page's HTML, throwing
+        "Unexpected token '<'". It must return a JSON 401 with a
+        redirect_url field instead, never an HTTP redirect."""
         response = self.client.post(reverse("translator:upload"))
-        self.assertEqual(response.status_code, 302)
-        self.assertIn(reverse("translator:login"), response["Location"])
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response["Content-Type"], "application/json")
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["redirect_url"], reverse("translator:login"))
 
     # ------------------------------------------------------------------
     # TC-A07: Submit empty login credentials
@@ -5000,6 +5018,83 @@ class AppendixDOCRTests(TestCase):
                         "Page 2 segment must have lower segment_index than page 3")
 
 
+class RuntimeTranslationDatasetCorpusTests(TestCase):
+    """Runtime dataset must combine phrasebook lookup with the cleaned corpus."""
+
+    CORPUS_TAGABAWA = (
+        "T\u00f4 midug\u00e9 d\u00e1n banuwa, t\u00f4 pagb\u00e1nnal kat\u00f4 "
+        "mga t\u00f4 min-dug\u00e9 d\u00e1n banuwa Bag\u00f3b\u00f4 \u00e1s "
+        "Sandawa, manub\u00f9."
+    )
+    CORPUS_ENGLISH = (
+        "A long time ago on the earth, the belief of the Bagobo people was "
+        "that Sandawa, he was a person."
+    )
+
+    def test_default_runtime_dataset_loads_text_corpus(self):
+        from translator.services.translation_dataset import TranslationDataset
+
+        dataset = TranslationDataset()
+        result = dataset.translate_phrase_with_metadata(
+            self.CORPUS_ENGLISH,
+            "english",
+            "tagabawa",
+        )
+
+        self.assertGreater(len(dataset.data), 1028)
+        self.assertEqual(result["translated"], self.CORPUS_TAGABAWA)
+        self.assertEqual(result["method"], "exact_phrase")
+        self.assertFalse(result["needs_review"])
+
+    def test_unknown_sentence_with_known_words_is_not_word_by_word(self):
+        from translator.services.pipeline_service import PipelineService
+        from translator.services.translation_dataset import TranslationDataset
+
+        source = "Hello unknownword999"
+        dataset = TranslationDataset()
+        service = PipelineService.__new__(PipelineService)
+        service.translation_dataset = dataset
+        layout = [{
+            "blocks": [{
+                "type": "text",
+                "lines": [{"text": source}],
+            }]
+        }]
+
+        translations = service._translate_layout(layout, "english", "tagabawa")
+        record = translations["0_0_0"]
+
+        self.assertEqual(record["translated"], source)
+        self.assertEqual(record["method"], "unknown_for_review")
+        self.assertTrue(record["needs_review"])
+
+    def test_txt_upload_lines_are_translated_as_separate_segments(self):
+        from translator.services.pipeline_service import PipelineService
+        from translator.services.translation_dataset import TranslationDataset
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as handle:
+            handle.write(f"Hello\nHello unknownword999\n{self.CORPUS_ENGLISH}\n")
+            txt_path = handle.name
+        self.addCleanup(lambda: Path(txt_path).unlink(missing_ok=True))
+
+        layout = PipelineService._extract_txt_text_and_layout(txt_path)
+        text_lines = [
+            line["text"]
+            for block in layout[0]["blocks"]
+            for line in block["lines"]
+        ]
+        self.assertEqual(text_lines, ["Hello", "Hello unknownword999", self.CORPUS_ENGLISH])
+
+        service = PipelineService.__new__(PipelineService)
+        service.translation_dataset = TranslationDataset()
+        translations = service._translate_layout(layout, "english", "tagabawa")
+
+        self.assertEqual(translations["0_0_0"]["translated"], "Madig\u00e1r")
+        self.assertEqual(translations["0_0_1"]["translated"], "Hello unknownword999")
+        self.assertTrue(translations["0_0_1"]["needs_review"])
+        self.assertEqual(translations["0_0_2"]["translated"], self.CORPUS_TAGABAWA)
+
+
 class AppendixETranslationTests(TestCase):
     """Regression tests for Appendix E Sprint 5 — Cross-Lingual Translation Module."""
 
@@ -5068,7 +5163,7 @@ class AppendixETranslationTests(TestCase):
                              "_translate_layout must return a result keyed by '0_0_0' for the first line")
         self.assertNotEqual(line_result["translated"], UNKNOWN_FOR_REVIEW,
                             "A known phrase ('Hello') must be translated, not returned as UNKNOWN_FOR_REVIEW")
-        self.assertIn(line_result["method"], ("exact_phrase", "fuzzy_phrase", "word_by_word"),
+        self.assertIn(line_result["method"], ("exact_phrase", "normalized_phrase"),
                       "Translation method must be one of the valid cascade stages")
         self.assertIn("source_language", line_result,
                       "_translate_layout result must carry source_language")
@@ -5117,7 +5212,7 @@ class AppendixETranslationTests(TestCase):
         self.assertNotEqual(result["translated"], UNKNOWN_FOR_REVIEW,
                             "'Hello' must have a stored Tagabawa translation in the dataset")
         self.assertEqual(result["method"], "exact_phrase",
-                         "'Hello' must match via exact_phrase, not fall through to fuzzy or word_by_word")
+                         "'Hello' must match via exact_phrase, not fall through to fallback handling")
         self.assertEqual(result["confidence"], 1.0,
                          "An exact_phrase match must report confidence=1.0")
         self.assertEqual(result["translated"], "Madigár",
@@ -5169,23 +5264,24 @@ class AppendixETranslationTests(TestCase):
         self.assertEqual(phrase_result["translated"], "Unsad kó",
                          "Phrase match must return the stored phrase translation, not a word-by-word composite")
         self.assertEqual(phrase_result["confidence"], 1.0,
-                         "exact_phrase must report confidence=1.0; word_by_word would be 0.55")
+                         "exact_phrase must report confidence=1.0")
 
     # ------------------------------------------------------------------ TC-E06
     def test_tc_e06_unknown_word_is_retained_and_marked(self):
-        """Completely unmatched text returns UNKNOWN_FOR_REVIEW; segment is stored with needs_review=True."""
+        """Completely unmatched text remains source text and is marked needs_review=True."""
         from translator.services.translation_dataset import UNKNOWN_FOR_REVIEW
         from translator.services import _sync_structure_models
 
         unknown_result = self.dataset.translate_phrase_with_metadata(
             "XYZXYZ ABCABC", "english", "tagabawa"
         )
-        self.assertEqual(unknown_result["translated"], UNKNOWN_FOR_REVIEW,
-                         "Completely unknown phrase must return UNKNOWN_FOR_REVIEW, not a fabricated translation")
+        self.assertEqual(unknown_result["translated"], "XYZXYZ ABCABC",
+                         "Completely unknown phrase must stay as source text, not a fabricated translation")
         self.assertEqual(unknown_result["method"], "unknown_for_review",
                          "method must be 'unknown_for_review' when no match exists at any cascade stage")
         self.assertEqual(unknown_result["confidence"], 0.0,
                          "confidence must be 0.0 for unknown_for_review results")
+        self.assertTrue(unknown_result["needs_review"])
 
         job = self._create_job(self.alice)
         structure_path = self._write_structure(job, {
@@ -5306,10 +5402,11 @@ class AppendixETranslationTests(TestCase):
 
         completely_unknown = "ZQXZQX NONSENSE"
         result = self.dataset.translate_phrase_with_metadata(completely_unknown, "english", "tagabawa")
-        self.assertEqual(result["translated"], UNKNOWN_FOR_REVIEW,
-                         "Unrecognized phrase must return UNKNOWN_FOR_REVIEW — no fabricated translation")
+        self.assertEqual(result["translated"], completely_unknown,
+                         "Unrecognized phrase must stay as source text - no fabricated translation")
         self.assertEqual(result["method"], "unknown_for_review")
         self.assertEqual(result["confidence"], 0.0)
+        self.assertTrue(result["needs_review"])
 
         job = self._create_job(self.alice)
         structure_path = self._write_structure(job, {
@@ -8169,3 +8266,200 @@ class AppendixKBilingualPreviewUXTests(TestCase):
         self.assertNotIn("byt5_neural", body)
         self.assertNotIn("Technical Details", body)
         self.assertNotIn("badge-method", body)
+
+
+class AppendixLJsonApiTests(TestCase):
+    """Regression tests for the "Unexpected token '<'" bug: fetch() in
+    app.js parses every /translate/upload/, /translate/status/,
+    /translate/structure/, and /translate/preview-data/ response as JSON.
+    These endpoints must never hand back an HTML login redirect, an HTML
+    CSRF error page, or an HTML 404 page — only JSON, on every path."""
+
+    password = "Bagobo-AppL-2026!"
+
+    def setUp(self):
+        from django.core.cache import cache as _cache
+        _cache.clear()
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="appl_alice", email="appl_alice@example.test", password=self.password
+        )
+        self.staff_user = User.objects.create_user(
+            username="appl_staff",
+            email="appl_staff@example.test",
+            password=self.password,
+            is_staff=True,
+        )
+
+    def _make_job(self, owner, **kwargs):
+        defaults = dict(
+            original_filename="doc.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            source_language="english",
+            target_language="tagabawa",
+        )
+        defaults.update(kwargs)
+        return TranslationJob.objects.create(owner=owner, **defaults)
+
+    # ------------------------------------------------------------------
+    # Upload (start-translation) endpoint
+    # ------------------------------------------------------------------
+
+    def test_upload_success_returns_json(self):
+        self.client.force_login(self.alice)
+        uploaded = SimpleUploadedFile(
+            "doc.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF", content_type="application/pdf"
+        )
+        with patch("translator.views.start_translation_job"):
+            response = self.client.post(
+                reverse("translator:upload"),
+                {"file": uploaded, "source_language": "auto", "target_language": "tagabawa"},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertIn("job_id", response.json())
+
+    def test_upload_validation_error_returns_json(self):
+        self.client.force_login(self.alice)
+        bad_file = SimpleUploadedFile("danger.exe", b"binary", content_type="application/octet-stream")
+        response = self.client.post(reverse("translator:upload"), {"file": bad_file})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    def test_upload_unauthenticated_does_not_redirect(self):
+        response = self.client.post(reverse("translator:upload"))
+        # No HTML redirect: fetch() follows redirects automatically, which
+        # is exactly what previously fed response.json() an HTML page.
+        self.assertNotEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 401)
+
+    def test_upload_unexpected_exception_returns_friendly_json_for_normal_user(self):
+        self.client.force_login(self.alice)
+        uploaded = SimpleUploadedFile(
+            "doc.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF", content_type="application/pdf"
+        )
+        with patch("translator.views.save_uploaded_file", side_effect=OSError("disk full")):
+            response = self.client.post(
+                reverse("translator:upload"),
+                {"file": uploaded, "source_language": "auto", "target_language": "tagabawa"},
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response["Content-Type"], "application/json")
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(
+            data["error"],
+            "Translation could not be completed. Please try another file or contact the administrator.",
+        )
+        self.assertNotIn("disk full", data["error"])
+        self.assertNotIn("technical_detail", data)
+
+    def test_upload_unexpected_exception_includes_technical_detail_for_staff(self):
+        self.client.force_login(self.staff_user)
+        uploaded = SimpleUploadedFile(
+            "doc.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF", content_type="application/pdf"
+        )
+        with patch("translator.views.save_uploaded_file", side_effect=OSError("disk full")):
+            response = self.client.post(
+                reverse("translator:upload"),
+                {"file": uploaded, "source_language": "auto", "target_language": "tagabawa"},
+            )
+        self.assertEqual(response.status_code, 500)
+        data = response.json()
+        self.assertIn("disk full", data["technical_detail"])
+
+    # ------------------------------------------------------------------
+    # Status / structure / preview-data endpoints
+    # ------------------------------------------------------------------
+
+    def test_status_unauthenticated_returns_json_not_html(self):
+        job = self._make_job(self.alice)
+        response = self.client.get(reverse("translator:status", args=[job.job_id]))
+        self.assertNotEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertFalse(response.json()["ok"])
+
+    def test_status_unknown_job_returns_json_404_not_html(self):
+        import uuid
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:status", args=[uuid.uuid4()]))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response["Content-Type"], "application/json")
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Job not found.")
+
+    def test_structure_unknown_job_returns_json_404_not_html(self):
+        import uuid
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:structure", args=[uuid.uuid4()]))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    def test_preview_data_unknown_job_returns_json_404_not_html(self):
+        import uuid
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:preview_data", args=[uuid.uuid4()]))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    def test_status_for_other_users_job_returns_json_404_not_html(self):
+        """A job ID that exists but is owned by someone else must still come
+        back as a clean JSON 404, not Django's owner-queryset Http404 page."""
+        other = User.objects.create_user(
+            username="appl_bob", email="appl_bob@example.test", password=self.password
+        )
+        job = self._make_job(other)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:status", args=[job.job_id]))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    # ------------------------------------------------------------------
+    # CSRF failures on JSON API routes
+    # ------------------------------------------------------------------
+
+    def test_csrf_failure_on_status_endpoint_returns_json(self):
+        from django.test import Client
+        job = self._make_job(self.alice)
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.alice)
+        # GET requests aren't CSRF-checked; force a POST-like CSRF failure
+        # path via the upload endpoint, which is what the bug report hit.
+        response = csrf_client.post(reverse("translator:upload"), {"file": "dummy"})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertNotIn(b"<!DOCTYPE", response.content[:20])
+
+    # ------------------------------------------------------------------
+    # Normal HTML pages must keep working unchanged
+    # ------------------------------------------------------------------
+
+    def test_translate_page_unauthenticated_still_redirects_to_html_login(self):
+        """Only the JSON API routes change behavior. Normal page navigation
+        (not fetch+JSON) must keep using the standard login redirect."""
+        translate_url = reverse("translator:translate")
+        response = self.client.get(translate_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("translator:login"), response["Location"])
+
+    def test_history_page_still_renders_html(self):
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:history"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"].split(";")[0], "text/html")
+
+    def test_job_detail_page_still_renders_html(self):
+        job = self._make_job(self.alice)
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"].split(";")[0], "text/html")

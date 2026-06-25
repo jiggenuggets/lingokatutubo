@@ -90,14 +90,16 @@ class TranslationDatasetReverseLookupTests(unittest.TestCase):
         )
 
     def test_unknown_tagabawa_fallback_does_not_raise(self):
+        source = "mabantug-unknown-phrase"
         result = self.ds.translate_phrase_with_metadata(
-            "mabantug-unknown-phrase",
+            source,
             source_lang="tagabawa",
             target_lang="english",
         )
-        self.assertEqual(result["translated"], UNKNOWN_FOR_REVIEW)
+        self.assertEqual(result["translated"], source)
         self.assertEqual(result["method"], "unknown_for_review")
         self.assertEqual(result["confidence"], 0.0)
+        self.assertTrue(result["needs_review"])
 
     def test_reverse_lookup_with_diacritics(self):
         self.assertEqual(
@@ -129,9 +131,10 @@ class TranslationDatasetReverseLookupTests(unittest.TestCase):
         )
 
         record = translations["0_0_0"]
-        self.assertEqual(record["translated"], UNKNOWN_FOR_REVIEW)
+        self.assertEqual(record["translated"], "mabantug-unknown-phrase")
         self.assertEqual(record["method"], "unknown_for_review")
         self.assertEqual(record["confidence"], 0.0)
+        self.assertTrue(record["needs_review"])
 
 
 class TrainingJsonlExportTests(unittest.TestCase):

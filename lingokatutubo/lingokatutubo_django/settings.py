@@ -134,6 +134,11 @@ LOGIN_URL = "translator:login"
 LOGIN_REDIRECT_URL = "translator:translate"
 LOGOUT_REDIRECT_URL = "translator:home"
 
+# JSON API routes (see translator.views.JSON_API_PATH_PREFIXES) need a JSON
+# CSRF failure body so fetch() callers don't choke parsing Django's HTML CSRF
+# error page as JSON. Normal HTML form posts keep the default page.
+CSRF_FAILURE_VIEW = "translator.views.csrf_failure"
+
 # Email — used for the password-reset workflow. Defaults to the console
 # backend so reset emails are visible in the dev server log when no SMTP
 # settings are configured. For production, set DJANGO_EMAIL_BACKEND to

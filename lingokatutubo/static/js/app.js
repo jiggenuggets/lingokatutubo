@@ -118,6 +118,27 @@
     errorBox.textContent = message || "";
   }
 
+  // Django can hand back an HTML page instead of JSON (login redirect, CSRF
+  // failure, 404/500 error page) whenever something between the browser and
+  // the view doesn't go as planned. Parsing that as JSON throws a raw
+  // "Unexpected token '<'" SyntaxError — never call response.json() without
+  // checking Content-Type first, or that raw parser error reaches the user.
+  function parseJsonResponse(response) {
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      return response.text().then((bodyText) => {
+        console.error(
+          "Expected JSON but received:",
+          response.status,
+          contentType,
+          bodyText.slice(0, 300)
+        );
+        throw new Error("The server returned an unexpected response. Please refresh and try again.");
+      });
+    }
+    return response.json().then((data) => ({ response, data }));
+  }
+
   class PollingController {
     constructor(key, statusUrl, handlers) {
       this.key = key;
@@ -178,12 +199,13 @@
         return;
       }
       this.inFlight = true;
-      fetch(this.statusUrl, { credentials: "same-origin" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
-          return response.json();
-        })
-        .then((data) => {
+      fetch(this.statusUrl, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      })
+        .then(parseJsonResponse)
+        .then(({ response, data }) => {
+          if (!response.ok) throw new Error(data.error || `Status check failed (${response.status}).`);
           this.failureCount = 0;
           this.lastData = data;
           if (this.handlers.onUpdate) this.handlers.onUpdate(data);
@@ -388,11 +410,15 @@
         method: "POST",
         body: new FormData(form),
         credentials: "same-origin",
-        headers: { "X-CSRFToken": csrfToken() },
+        headers: {
+          "X-CSRFToken": csrfToken(),
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
       })
-        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
-        .then(({ ok, data }) => {
-          if (!ok) throw new Error(formatUploadError(data));
+        .then(parseJsonResponse)
+        .then(({ response, data }) => {
+          if (!response.ok) throw new Error(formatUploadError(data));
           currentJobId = data.job_id;
           isUploading = false;
           disableUploadLeaveWarning();
@@ -415,6 +441,7 @@
           isSubmitting = false;
           button.disabled = false;
           button.textContent = "Start Translation";
+          setHidden(progressCard, true);
           setError(errorBox, error.message || "Upload failed.");
         });
     });
@@ -506,12 +533,15 @@
           controller.poll();
           return;
         }
-        fetch(root.dataset.statusUrl, { credentials: "same-origin" })
-          .then((response) => {
-            if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
-            return response.json();
+        fetch(root.dataset.statusUrl, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        })
+          .then(parseJsonResponse)
+          .then(({ response, data }) => {
+            if (!response.ok) throw new Error(data.error || `Status check failed (${response.status}).`);
+            applyStatus(data);
           })
-          .then(applyStatus)
           .catch((error) => networkState(`${error.message || "Could not reach the server."} Retrying status check...`));
       });
     }
@@ -662,16 +692,21 @@
     });
 
     Promise.all([
-      fetch(root.dataset.previewUrl, { credentials: "same-origin" }),
-      fetch(root.dataset.structureUrl, { credentials: "same-origin" }),
+      fetch(root.dataset.previewUrl, { credentials: "same-origin", headers: { Accept: "application/json" } }),
+      fetch(root.dataset.structureUrl, { credentials: "same-origin", headers: { Accept: "application/json" } }),
     ])
-      .then(async ([previewResponse, structureResponse]) => {
-        if (!previewResponse.ok) {
-          const data = await previewResponse.json().catch(() => ({}));
-          throw new Error(data.error || `Preview failed (${previewResponse.status}).`);
+      .then(([previewResponse, structureResponse]) =>
+        Promise.all([
+          parseJsonResponse(previewResponse),
+          parseJsonResponse(structureResponse).catch(() => ({ response: structureResponse, data: null })),
+        ])
+      )
+      .then(([previewResult, structureResult]) => {
+        if (!previewResult.response.ok) {
+          throw new Error(previewResult.data.error || `Preview failed (${previewResult.response.status}).`);
         }
-        preview = await previewResponse.json();
-        structure = structureResponse.ok ? await structureResponse.json() : null;
+        preview = previewResult.data;
+        structure = structureResult.response.ok ? structureResult.data : null;
         loading.hidden = true;
         content.hidden = false;
         render();

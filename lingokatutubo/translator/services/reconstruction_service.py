@@ -723,9 +723,9 @@ class ReconstructionService:
 
                         # Identity translations (same source/target language)
                         # are the only safe case for skipping. Never skip when
-                        # the dataset gave us an exact_phrase / fuzzy_phrase /
-                        # word_by_word translation, even if its rendered form
-                        # happens to coincide with the source text.
+                        # the dataset gave us an exact/normalized translation,
+                        # even if its rendered form happens to coincide with
+                        # the source text.
                         if (
                             translation_method == "identity"
                             and translated_text.strip() == original_text.strip()
