@@ -1,0 +1,35 @@
+{% with job=state.job %}
+<article class="document-card{% if card_compact %} document-card-compact{% endif %}">
+  <div class="document-thumb {{ state.file_icon_class }}" aria-hidden="true">
+    {% if state.thumbnail_url %}
+      <img src="{{ state.thumbnail_url }}" alt="">
+    {% else %}
+      <span>{{ state.thumbnail_label }}</span>
+    {% endif %}
+  </div>
+  <div class="document-card-body">
+    <div class="document-card-top">
+      <h3 class="document-card-title">
+        <a href="{% url 'translator:job_detail' job.id %}" title="{{ state.document_title }}">{{ state.document_title }}</a>
+      </h3>
+      <span class="status-pill {{ state.status_class }}" role="status">{{ state.status_label }}</span>
+    </div>
+    <p>{{ state.uploaded_at|date:"M j, Y" }} &middot; {{ job.source_language }} &rarr; {{ job.target_language }}</p>
+
+    {% if state.has_failed %}
+      <p class="inline-error" role="alert">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        Translation failed safely.
+      </p>
+    {% elif state.is_processing %}
+      <p class="text-muted small">Preview available once processing completes.</p>
+    {% endif %}
+
+    {% if state.can_preview %}
+      <div class="document-card-action">
+        <a class="button primary js-preview-link" data-loading-text="Preparing bilingual preview&hellip;" href="{% url 'translator:job_preview' job.id %}" aria-label="Preview bilingual document for {{ state.document_title }}">Preview</a>
+      </div>
+    {% endif %}
+  </div>
+</article>
+{% endwith %}

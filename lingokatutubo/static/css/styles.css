@@ -398,19 +398,26 @@ p  { margin-top: 0; line-height: var(--lh-body); }
   transform: translateY(0);
 }
 
-.button:disabled {
+.button:disabled,
+.button.primary:disabled,
+.button.secondary:disabled,
+.button.danger-outline:disabled {
+  color: var(--muted);
+  background: hsl(140 17% 94%);
+  border-color: var(--line);
+  box-shadow: none;
   cursor: not-allowed;
-  opacity: 0.5;
   transform: none;
 }
 
 .button.primary {
   color: #fff;
-  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  background: var(--primary);
   box-shadow: 0 4px 14px hsl(154 67% 25% / 0.2);
 }
 
 .button.primary:hover {
+  background: var(--primary-dark);
   box-shadow: 0 6px 20px hsl(154 67% 25% / 0.3);
 }
 
@@ -425,20 +432,7 @@ p  { margin-top: 0; line-height: var(--lh-body); }
   border-color: hsl(154 67% 25% / 0.5);
 }
 
-/* Danger filled — for final destructive confirm */
-.button.danger {
-  color: #fff;
-  background: var(--danger);
-  border-color: var(--danger);
-  box-shadow: 0 4px 14px hsl(4 76% 40% / 0.2);
-}
-
-.button.danger:hover {
-  background: hsl(4 76% 33%);
-  box-shadow: 0 6px 20px hsl(4 76% 40% / 0.35);
-}
-
-/* Danger outline — for history card, job detail */
+/* Danger outline — the only danger style; used sparingly, never as a primary action */
 .button.danger-outline {
   color: var(--danger);
   background: var(--paper);
@@ -900,12 +894,6 @@ h1 {
   margin-bottom: var(--space-4);
 }
 
-.view-all-link {
-  font-size: var(--fs-helper);
-  font-weight: 700;
-  color: var(--primary);
-}
-
 /* Upload panel */
 .upload-panel,
 .settings-panel {
@@ -1131,6 +1119,20 @@ h1 {
   -webkit-box-orient: vertical;
 }
 
+.document-card-title a {
+  color: inherit;
+}
+
+.document-card-title a:hover {
+  text-decoration: underline;
+}
+
+.document-card-action {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
 .document-card-body p {
   margin: 0 0 var(--space-1);
   color: var(--muted);
@@ -1189,10 +1191,6 @@ h1 {
   gap: var(--space-4);
 }
 
-.history-card {
-  grid-template-columns: 100px minmax(0, 1fr);
-}
-
 .history-filters {
   margin-bottom: var(--space-5);
   padding: var(--space-4) var(--space-5);
@@ -1210,37 +1208,6 @@ h1 {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-}
-
-/* History actions — two zones: primary and danger */
-.history-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--line);
-}
-
-.history-actions-primary {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
-.history-actions-danger {
-  margin-left: auto;
-}
-
-/* Compact actions in sidebar */
-.compact-actions {
-  margin-top: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--line);
-  justify-content: flex-start;
-  gap: var(--space-3);
 }
 
 /* Inline error */
@@ -1356,22 +1323,26 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-.job-detail-actions {
+/* Top action bar — primary actions live at the top of job detail, not the bottom */
+.top-action-bar {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
-  margin-top: var(--space-5);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-5);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
 }
 
-.job-detail-actions-primary {
+.top-action-bar-primary {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
 }
 
-.job-detail-actions-danger {
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--line);
+.top-action-bar-danger {
+  margin-left: auto;
 }
 
 .status-monitor {
@@ -1532,26 +1503,67 @@ h1 {
   font-size: var(--fs-helper);
 }
 
+.preview-title-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.preview-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--paper);
+}
+
+.preview-zoom-button {
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--muted-strong);
+  background: transparent;
+  font: inherit;
+  font-size: var(--fs-helper);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.preview-zoom-button:hover,
+.preview-zoom-button:focus-visible {
+  color: var(--primary-dark);
+  border-color: var(--line);
+  outline: none;
+}
+
+.preview-zoom-button.is-active {
+  color: var(--paper);
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
 .bilingual-document-preview {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  --preview-zoom: 1;
+  --preview-card-width: 100%;
+  display: flex;
+  flex-direction: column;
   gap: var(--space-4);
-  align-items: stretch;
   min-width: 0;
   width: 100%;
   overflow-x: hidden;
 }
 
-.document-panel {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: hsl(0 0% 99%);
-  box-shadow: var(--shadow-card);
-  overflow: hidden;
+/* Sticky-style labels above the per-page rows below — rendered once, not per page,
+   so original/translated stay aligned by page number without independent scrolling. */
+.document-compare-headers {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-4);
 }
 
 .document-panel-header {
@@ -1559,7 +1571,8 @@ h1 {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
   background: var(--paper);
 }
 
@@ -1570,28 +1583,24 @@ h1 {
   font-weight: 800;
 }
 
-.document-panel-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  flex: 1;
-  min-width: 0;
-  max-height: 680px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: var(--space-3);
-  background: var(--background);
-  overscroll-behavior: contain;
+.document-page-row-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-4);
+  width: 100%;
 }
 
-.document-panel img,
-.document-panel canvas,
-.document-panel iframe,
-.document-panel svg {
+.document-page-col {
+  min-width: 0;
+}
+
+.document-page-col img,
+.document-page-col canvas,
+.document-page-col iframe,
+.document-page-col svg {
   display: block;
   max-width: 100% !important;
-  width: auto;
-  max-height: min(62vh, 560px);
+  width: 100%;
   height: auto;
   margin-left: auto;
   margin-right: auto;
@@ -1599,18 +1608,26 @@ h1 {
 }
 
 .document-page-card {
-  display: grid;
-  justify-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
   flex: 0 0 auto;
   min-width: 0;
-  width: 100%;
-  max-width: 100%;
+  width: var(--preview-card-width);
+  max-width: none;
+  margin: 0 auto;
   padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
   background: var(--paper);
-  overflow: hidden;
+  overflow: visible;
   box-sizing: border-box;
+}
+
+.bilingual-document-preview.is-fit-width .document-page-card {
+  width: 100%;
+  max-width: 100%;
 }
 
 .preview-page-card,
@@ -1625,7 +1642,7 @@ h1 {
 }
 
 .document-page-label {
-  justify-self: stretch;
+  align-self: stretch;
   margin-bottom: var(--space-2);
   color: var(--muted);
   font-size: var(--fs-badge);
@@ -1635,9 +1652,8 @@ h1 {
 }
 
 .document-page-image {
-  width: auto;
+  width: 100%;
   max-width: 100% !important;
-  max-height: min(62vh, 560px);
   min-height: 0;
   border: 1px solid hsl(140 16% 88%);
   border-radius: var(--radius-xs);
@@ -1650,7 +1666,6 @@ h1 {
   min-width: 0;
   width: 100%;
   max-width: 100%;
-  max-height: min(62vh, 560px);
   min-height: 0;
   margin: 0;
   padding: var(--space-4);
@@ -1667,9 +1682,9 @@ h1 {
   box-sizing: border-box;
 }
 
-.document-panel .page,
-.document-panel .pdf-page,
-.document-panel .document-page {
+.document-page-col .page,
+.document-page-col .pdf-page,
+.document-page-col .document-page {
   max-width: 100% !important;
   width: 100% !important;
   min-width: 0;
@@ -2341,7 +2356,8 @@ h1 {
 }
 
 @media (max-width: 700px) {
-  .bilingual-document-preview {
+  .document-compare-headers,
+  .document-page-row-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -2358,12 +2374,11 @@ h1 {
 
   .page-heading-row { flex-direction: column; align-items: flex-start; }
 
-  .history-actions { flex-direction: column; align-items: flex-start; }
-  .history-actions-danger { margin-left: 0; }
+  .top-action-bar { flex-direction: column; align-items: flex-start; }
+  .top-action-bar-danger { margin-left: 0; }
 
   .document-meta-grid { grid-template-columns: 1fr; }
   .preview-summary-strip { grid-template-columns: 1fr; }
-  .document-panel-body { max-height: none; }
   .document-page-image,
   .document-text-preview { min-height: 280px; }
 

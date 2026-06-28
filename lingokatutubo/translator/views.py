@@ -277,6 +277,15 @@ def job_detail(request, job_id):
     context = _job_card_context(job)
     # Suppress the global active-job banner when we're already viewing this job's detail page
     context["hide_active_job_banner"] = context["is_processing"]
+
+    if job.status == TranslationJob.Status.COMPLETED:
+        # Show the "ready" message once per job per session — not on every
+        # reload of an already-acknowledged completed job.
+        notified_key = f"job_ready_notified_{job.id}"
+        if not request.session.get(notified_key):
+            messages.success(request, "Translated file is ready.")
+            request.session[notified_key] = True
+
     return render(request, "translator/job_detail.html", context)
 
 
@@ -552,6 +561,12 @@ def api_preview(request, job_id):
         for item in metadata.get("preview_translated", [])
         if _preview_image_url(job, item)
     ]
+    document_page_count = max(
+        _metadata_document_page_count(metadata),
+        int(getattr(job, "page_count", 0) or job.pages.count()),
+        len(original_pages),
+        len(translated_pages),
+    )
     bilingual_first_page = _display_safe_bilingual_first_page(
         metadata.get("bilingual_first_page", {"blocks": []})
     )
@@ -563,7 +578,9 @@ def api_preview(request, job_id):
             "bilingual_first_page": bilingual_first_page,
             "original_pages": original_pages,
             "translated_pages": translated_pages,
-            "page_count": max(len(original_pages), len(translated_pages)),
+            "page_count": document_page_count,
+            "document_page_count": document_page_count,
+            "previewed_page_count": max(len(original_pages), len(translated_pages)),
             **translation_quality,
             "translation_summary": translation_quality,
             "segments": [
@@ -1103,7 +1120,11 @@ def _job_card_context(job: TranslationJob) -> dict:
             ),
             **translation_quality,
             "workflow_steps": _workflow_steps(job),
-            "page_count": int(getattr(job, "page_count", 0) or job.pages.count()),
+            "page_count": int(
+                getattr(job, "page_count", 0)
+                or job.pages.count()
+                or _metadata_document_page_count(job.metadata or {})
+            ),
             "thumbnail_url": thumbnail["url"],
             "thumbnail_kind": thumbnail["kind"],
             "thumbnail_label": thumbnail["label"],
@@ -1126,6 +1147,23 @@ def _job_card_context(job: TranslationJob) -> dict:
     )
 
     return context
+
+
+def _positive_int(value) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+def _metadata_document_page_count(metadata: dict) -> int:
+    return max(
+        _positive_int(metadata.get("translated_page_count")),
+        _positive_int(metadata.get("source_page_count")),
+        _positive_int(metadata.get("layout_page_count")),
+        _positive_int(metadata.get("page_count")),
+    )
 
 
 def _translation_quality_context(job: TranslationJob) -> dict:
@@ -1428,6 +1466,7 @@ def _image_preview_context(job: TranslationJob) -> dict:
         for item in metadata.get("preview_translated", [])
         if _preview_image_url(job, item)
     ]
+    declared_page_count = _metadata_document_page_count(metadata)
 
     document_pages = list(_iter_related(job, "pages"))
     page_text = {
@@ -1456,6 +1495,8 @@ def _image_preview_context(job: TranslationJob) -> dict:
     image_page_count = max(len(original_pages), len(translated_pages))
     if image_page_count:
         page_numbers.update(range(1, image_page_count + 1))
+    if declared_page_count:
+        page_numbers.update(range(1, declared_page_count + 1))
 
     page_pairs = []
     for page_number in sorted(page_numbers):
@@ -1481,7 +1522,14 @@ def _image_preview_context(job: TranslationJob) -> dict:
         "original_pages": original_pages,
         "translated_pages": translated_pages,
         "page_pairs": page_pairs,
-        "page_count": max(len(original_pages), len(translated_pages), len(page_pairs)),
+        "page_count": max(
+            len(original_pages),
+            len(translated_pages),
+            len(page_pairs),
+            declared_page_count,
+        ),
+        "document_page_count": max(len(page_pairs), declared_page_count),
+        "previewed_page_count": image_page_count,
     }
 
 

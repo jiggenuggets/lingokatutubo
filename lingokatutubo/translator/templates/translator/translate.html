@@ -14,38 +14,13 @@
     <aside class="recent-sidebar" aria-label="Recent documents">
       <div class="section-title-row">
         <h2>Recent Documents</h2>
-        <a href="{% url 'translator:history' %}" class="view-all-link">View all →</a>
+        <a href="{% url 'translator:history' %}" class="button-link">View all →</a>
       </div>
 
       {% if recent_jobs %}
         <div class="document-card-list compact">
           {% for state in recent_jobs %}
-            {% with job=state.job %}
-              <article class="document-card">
-                <div class="document-thumb {{ state.file_icon_class }}" aria-hidden="true">
-                  {% if state.thumbnail_url %}
-                    <img src="{{ state.thumbnail_url }}" alt="{{ state.document_title }} preview">
-                  {% else %}
-                    <span>{{ state.thumbnail_label }}</span>
-                  {% endif %}
-                </div>
-                <div class="document-card-body">
-                  <h3 class="document-card-title" title="{{ state.document_title }}">{{ state.document_title }}</h3>
-                  <p>{{ state.uploaded_at|date:"M j, Y" }}</p>
-                  <p>{{ job.source_language }} → {{ job.target_language }}</p>
-                  <span class="status-pill {{ state.status_class }}" role="status">{{ state.status_label }}</span>
-                  <div class="history-actions compact-actions">
-                    <a class="button-link" href="{% url 'translator:job_detail' job.id %}">Details</a>
-                    {% if state.can_preview %}
-                      <a class="button-link js-preview-link" data-loading-text="Opening Preview…" href="{% url 'translator:job_preview' job.id %}">Preview</a>
-                    {% endif %}
-                    {% if state.can_download %}
-                      <a class="button-link" href="{% url 'translator:job_download' job.id %}">Download</a>
-                    {% endif %}
-                  </div>
-                </div>
-              </article>
-            {% endwith %}
+            {% include "translator/partials/_document_card.html" with state=state card_compact=True %}
           {% endfor %}
         </div>
       {% else %}
@@ -135,7 +110,7 @@
       </button>
 
       <div id="complete-actions" class="complete-actions" hidden>
-        <a id="preview-link" class="button secondary full js-preview-link" data-loading-text="Opening Bilingual Preview…" href="#" hidden>Preview Bilingual</a>
+        <a id="preview-link" class="button secondary full js-preview-link" data-loading-text="Preparing bilingual preview…" href="#" hidden>Preview Bilingual</a>
         <a id="download-link" class="button primary full" href="#" hidden>Download Translated PDF</a>
       </div>
 

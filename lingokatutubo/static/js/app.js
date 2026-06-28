@@ -37,15 +37,6 @@
     return value == null ? "" : String(value);
   }
 
-  function escapeHtml(value) {
-    return text(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
   function csrfToken() {
     const input = document.querySelector("input[name='csrfmiddlewaretoken']");
     if (input) return input.value;
@@ -517,6 +508,9 @@
       onUpdate: applyStatus,
       onTerminal: (data) => {
         applyStatus(data);
+        if (normalizeStatus(data.status) === "completed") {
+          showStatusMessage("Translated file is ready.", "success");
+        }
         controller = null;
       },
       onNetworkState: networkState,
@@ -559,159 +553,48 @@
     return data.error || "Upload failed.";
   }
 
-  function initPreview() {
+  function initRenderedPreviewControls() {
     const root = document.getElementById("preview-app");
-    if (!root) return;
-    const loading = document.getElementById("preview-loading");
-    const content = document.getElementById("preview-content");
-    const errorBox = document.getElementById("preview-error");
-    const originalImage = document.getElementById("original-image");
-    const translatedImage = document.getElementById("translated-image");
-    const originalEmpty = document.getElementById("original-empty");
-    const translatedEmpty = document.getElementById("translated-empty");
-    const currentPageEl = document.getElementById("current-page");
-    const pageCountEl = document.getElementById("page-count");
-    const previousButton = document.getElementById("previous-page");
-    const nextButton = document.getElementById("next-page");
-    const detailsList = document.getElementById("details-list");
-    const warningBox = document.getElementById("structure-warnings");
-    const detailsPanel = document.querySelector(".translation-details");
-    const detailsSummary = detailsPanel ? detailsPanel.querySelector("summary") : null;
+    const scope = document.querySelector("[data-preview-scope]");
+    const buttons = document.querySelectorAll("[data-preview-zoom-action]");
+    if (!root || !scope || !buttons.length) return;
 
-    if (!content || !loading || !errorBox || !originalImage || !translatedImage) return;
+    const MIN_ZOOM = 0.75;
+    const MAX_ZOOM = 1.5;
+    const ZOOM_STEP = 0.15;
+    let zoom = 1;
 
-    let preview = null;
-    let structure = null;
-    let currentPage = 1;
-
-    if (detailsPanel && detailsSummary) {
-      detailsSummary.setAttribute("aria-expanded", detailsPanel.open ? "true" : "false");
-      detailsPanel.addEventListener("toggle", () => {
-        detailsSummary.setAttribute("aria-expanded", detailsPanel.open ? "true" : "false");
+    function updateButtons(activeAction) {
+      buttons.forEach((button) => {
+        const isActive = button.dataset.previewZoomAction === activeAction;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
       });
     }
 
-    function showError(message) {
-      loading.hidden = true;
-      content.hidden = true;
-      errorBox.hidden = false;
-      errorBox.textContent = message;
+    function setZoom(nextZoom, activeAction) {
+      zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+      const fitWidth = activeAction === "fit" || activeAction === "reset";
+      scope.style.setProperty("--preview-zoom", zoom.toFixed(2));
+      scope.style.setProperty("--preview-card-width", `${Math.round(zoom * 100)}%`);
+      scope.classList.toggle("is-fit-width", fitWidth);
+      updateButtons(activeAction);
     }
 
-    function pageCount() {
-      if (!preview) return 1;
-      return Math.max(
-        preview.original_pages ? preview.original_pages.length : 0,
-        preview.translated_pages ? preview.translated_pages.length : 0,
-        Number(preview.page_count || 0),
-        1
-      );
-    }
-
-    function setImage(img, empty, url) {
-      if (url) {
-        img.hidden = false;
-        img.src = url;
-        empty.hidden = true;
-      } else {
-        img.hidden = true;
-        img.removeAttribute("src");
-        empty.hidden = false;
-      }
-    }
-
-    function renderDetails(pageIndex) {
-      const page = structure && structure.pages ? structure.pages[pageIndex] : null;
-      let blocks = page && page.blocks
-        ? page.blocks.filter((block) => block.type === "text" || block.block_type === "text")
-        : [];
-      if (!blocks.length && pageIndex === 0 && preview.bilingual_first_page) {
-        blocks = preview.bilingual_first_page.blocks || [];
-      }
-
-      if (!blocks.length) {
-        detailsList.innerHTML = `<p class="muted">No structured text blocks for this page.</p>`;
-        detailsList.hidden = false;
-      } else {
-        detailsList.innerHTML = blocks.map((block) => {
-          const source = block.source_text || block.original_text || "-";
-          const translated = block.display_translated_text || block.translated_text || source;
-          const translatedValue = text(translated);
-          const method = block.translation_method || block.cascade_stage || "unknown";
-          const confidence = Number(block.translation_confidence);
-          const confidenceText = Number.isFinite(confidence)
-            ? `${Math.round(confidence * 100)}%`
-            : "No confidence score";
-          const needsReview = Boolean(block.needs_review);
-          return `
-            <article class="detail-row">
-              <div>
-                <small>Original</small>
-                <p>${escapeHtml(source)}</p>
-              </div>
-              <div>
-                <small>Translation</small>
-                <p class="${needsReview ? "needs-review" : ""}">${escapeHtml(translated)}</p>
-                <p class="detail-meta">Method: ${escapeHtml(method)} | Confidence: ${escapeHtml(confidenceText)}</p>
-              </div>
-            </article>
-          `;
-        }).join("");
-        detailsList.hidden = false;
-      }
-
-      const warnings = structure && Array.isArray(structure.warnings) ? structure.warnings : [];
-      if (warnings.length) {
-        warningBox.hidden = false;
-        warningBox.innerHTML = `<strong>Layout warnings</strong><br>${warnings.slice(0, 6).map(escapeHtml).join("<br>")}`;
-      } else {
-        warningBox.hidden = true;
-      }
-    }
-
-    function render() {
-      const total = pageCount();
-      currentPage = Math.max(1, Math.min(currentPage, total));
-      const index = currentPage - 1;
-      currentPageEl.textContent = String(currentPage);
-      pageCountEl.textContent = String(total);
-      previousButton.disabled = currentPage <= 1;
-      nextButton.disabled = currentPage >= total;
-      setImage(originalImage, originalEmpty, preview.original_pages && preview.original_pages[index]);
-      setImage(translatedImage, translatedEmpty, preview.translated_pages && preview.translated_pages[index]);
-      renderDetails(index);
-    }
-
-    previousButton.addEventListener("click", () => {
-      currentPage -= 1;
-      render();
-    });
-    nextButton.addEventListener("click", () => {
-      currentPage += 1;
-      render();
-    });
-
-    Promise.all([
-      fetch(root.dataset.previewUrl, { credentials: "same-origin", headers: { Accept: "application/json" } }),
-      fetch(root.dataset.structureUrl, { credentials: "same-origin", headers: { Accept: "application/json" } }),
-    ])
-      .then(([previewResponse, structureResponse]) =>
-        Promise.all([
-          parseJsonResponse(previewResponse),
-          parseJsonResponse(structureResponse).catch(() => ({ response: structureResponse, data: null })),
-        ])
-      )
-      .then(([previewResult, structureResult]) => {
-        if (!previewResult.response.ok) {
-          throw new Error(previewResult.data.error || `Preview failed (${previewResult.response.status}).`);
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.previewZoomAction;
+        if (action === "fit" || action === "reset") {
+          setZoom(1, action);
+        } else if (action === "in") {
+          setZoom(zoom + ZOOM_STEP, "in");
+        } else if (action === "out") {
+          setZoom(zoom - ZOOM_STEP, "out");
         }
-        preview = previewResult.data;
-        structure = structureResult.response.ok ? structureResult.data : null;
-        loading.hidden = true;
-        content.hidden = false;
-        render();
-      })
-      .catch((error) => showError(error.message || "Could not load preview."));
+      });
+    });
+
+    setZoom(1, "fit");
   }
 
   function initPreviewLinks() {
@@ -722,7 +605,10 @@
     const overlayText = document.getElementById("page-transition-text");
     const errorBanner = document.getElementById("js-error-banner");
     const errorBannerText = document.getElementById("js-error-banner-text");
-    const OPEN_TIMEOUT_MS = 10000;
+    // Minimum time the loading state stays visible before navigating, so the
+    // transition reads as intentional instead of a sudden visual jump.
+    const MIN_LOADING_MS = 2500;
+    const FAILSAFE_TIMEOUT_MS = 12000;
 
     function showOverlay(message) {
       if (!overlay) return;
@@ -759,26 +645,28 @@
         if (!href || href === "#") return;
 
         event.preventDefault();
-        const loadingText = link.dataset.loadingText || "Opening Bilingual Preview…";
+        const loadingText = link.dataset.loadingText || "Preparing bilingual preview…";
         link.dataset.originalText = link.textContent;
         link.classList.add("is-loading");
         link.setAttribute("aria-disabled", "true");
         link.textContent = loadingText;
         showOverlay(loadingText);
 
-        window.setTimeout(() => {
+        const failsafeTimer = window.setTimeout(() => {
           link.classList.remove("is-loading");
           link.removeAttribute("aria-disabled");
           link.textContent = link.dataset.originalText || loadingText;
           hideOverlay();
           showOpenFailure();
-        }, OPEN_TIMEOUT_MS);
+        }, FAILSAFE_TIMEOUT_MS);
 
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => {
-            window.location.href = href;
-          });
-        });
+        // Hold the loading state for a fixed minimum duration, then navigate.
+        // Reduced-motion users still get this same wait — only the spinner
+        // animation is suppressed (see the prefers-reduced-motion CSS rule).
+        window.setTimeout(() => {
+          window.clearTimeout(failsafeTimer);
+          window.location.href = href;
+        }, MIN_LOADING_MS);
       });
     });
   }
@@ -808,24 +696,65 @@
     });
   }
 
+  function dismissMessage(msg) {
+    msg.style.transition = "opacity 200ms ease, transform 200ms ease";
+    msg.style.opacity = "0";
+    msg.style.transform = "translateY(-4px)";
+    setTimeout(() => msg.remove(), 210);
+  }
+
   function initMessageDismiss() {
     document.querySelectorAll(".message-dismiss").forEach((btn) => {
       btn.addEventListener("click", () => {
         const msg = btn.closest(".message");
-        if (msg) {
-          msg.style.transition = "opacity 200ms ease, transform 200ms ease";
-          msg.style.opacity = "0";
-          msg.style.transform = "translateY(-4px)";
-          setTimeout(() => msg.remove(), 210);
-        }
+        if (msg) dismissMessage(msg);
       });
     });
+  }
+
+  // Shows a dismissible, accessible status message (e.g. "Translated file is
+  // ready.") detected live via polling, without a page reload. Reuses the
+  // same markup/classes as Django's server-rendered messages so it looks and
+  // behaves identically, and creates the messages region if this page never
+  // rendered one (no messages were queued at request time).
+  function showStatusMessage(messageText, tone) {
+    let region = document.getElementById("messages-region");
+    if (!region) {
+      region = document.createElement("div");
+      region.className = "messages";
+      region.id = "messages-region";
+      region.setAttribute("aria-label", "Notifications");
+      const header = document.querySelector(".site-header");
+      if (header) {
+        header.insertAdjacentElement("afterend", region);
+      } else {
+        document.body.prepend(region);
+      }
+    }
+
+    const item = document.createElement("div");
+    item.className = `message ${tone || "info"}`;
+    item.setAttribute("role", "status");
+    item.setAttribute("aria-live", "polite");
+
+    const span = document.createElement("span");
+    span.textContent = messageText;
+
+    const dismissButton = document.createElement("button");
+    dismissButton.type = "button";
+    dismissButton.className = "message-dismiss";
+    dismissButton.setAttribute("aria-label", "Dismiss notification");
+    dismissButton.textContent = "✕";
+    dismissButton.addEventListener("click", () => dismissMessage(item));
+
+    item.append(span, dismissButton);
+    region.appendChild(item);
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     initUpload();
     initStatusPage();
-    initPreview();
+    initRenderedPreviewControls();
     initPreviewLinks();
     initMobileNav();
     initMessageDismiss();

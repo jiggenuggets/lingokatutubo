@@ -129,6 +129,67 @@ class PipelineService:
 
         return get_ocr_service().extract_image_text_and_layout(input_file_path)
 
+    @staticmethod
+    def _count_pdf_pages(pdf_path: str) -> Optional[int]:
+        doc = None
+        try:
+            import fitz
+
+            doc = fitz.open(pdf_path)
+            return int(doc.page_count)
+        except Exception as exc:
+            safe_print(f"[Pipeline] Could not count PDF pages for {pdf_path}: {exc}")
+            return None
+        finally:
+            if doc is not None and not getattr(doc, "is_closed", False):
+                doc.close()
+
+    @classmethod
+    def _require_pdf_page_count(
+        cls,
+        pdf_path: str,
+        expected_page_count: int,
+        label: str,
+    ) -> int:
+        actual_page_count = cls._count_pdf_pages(pdf_path)
+        if actual_page_count is None:
+            raise Exception(f"Could not verify {label} page count.")
+        if actual_page_count != expected_page_count:
+            raise Exception(
+                f"{label} has {actual_page_count} page(s), expected "
+                f"{expected_page_count}; cannot guarantee every page was translated."
+            )
+        return actual_page_count
+
+    @staticmethod
+    def _page_has_translatable_text(page_data: Dict[str, Any]) -> bool:
+        return any(
+            block.get("type") == "text"
+            and any(
+                clean_invisible_unicode(line.get("text") or "").strip()
+                for line in block.get("lines", [])
+            )
+            for block in page_data.get("blocks", [])
+        )
+
+    @classmethod
+    def _untranslated_page_warnings(cls, layout_data: List[Dict[str, Any]]) -> List[str]:
+        warnings: List[str] = []
+        for fallback_index, page_data in enumerate(layout_data, start=1):
+            if cls._page_has_translatable_text(page_data):
+                continue
+            issue = page_data.get("ocr_error") or page_data.get("ocr_warning")
+            if not issue:
+                continue
+            try:
+                page_number = int(page_data.get("page", fallback_index - 1)) + 1
+            except (TypeError, ValueError):
+                page_number = fallback_index
+            warnings.append(
+                f"Page {page_number}: OCR did not extract translatable text ({issue})."
+            )
+        return warnings
+
     def _set_job_phase(self, job: JobStatus, phase: str) -> None:
         phase_info = PIPELINE_PHASES.get(phase, PIPELINE_PHASES["queued"])
         job.current_phase = phase
@@ -294,6 +355,12 @@ class PipelineService:
                     f"Extracted layout validation failed: {validation_err}"
                 )
 
+            source_page_count: Optional[int] = None
+            if file_type == FileType.PDF:
+                source_page_count = self._count_pdf_pages(input_file_path)
+                if source_page_count is not None:
+                    job.metadata["source_page_count"] = source_page_count
+            job.metadata["layout_page_count"] = len(layout_data)
             job.metadata["layout_blocks"] = len(layout_data)
             self._persist_job(job)
 
@@ -312,6 +379,29 @@ class PipelineService:
                 self._persist_job(job)
             except Exception as struct_err:
                 safe_print(f"[Pipeline] Failed to build structure.json: {struct_err}")
+
+            if (
+                file_type == FileType.PDF
+                and source_page_count is not None
+                and layout_data
+                and len(layout_data) != source_page_count
+            ):
+                raise Exception(
+                    "Extracted layout covers "
+                    f"{len(layout_data)} page(s), but the source PDF has "
+                    f"{source_page_count}; cannot guarantee every page will be translated."
+                )
+
+            incomplete_page_warnings = self._untranslated_page_warnings(layout_data)
+            if incomplete_page_warnings:
+                job.metadata["untranslated_page_warnings"] = incomplete_page_warnings
+                self._append_structure_warnings(job_id, incomplete_page_warnings)
+                self._persist_job(job)
+                raise Exception(
+                    "Text could not be extracted from "
+                    f"{len(incomplete_page_warnings)} page(s); cannot guarantee "
+                    "every page will be translated. See structure.json warnings."
+                )
 
             # Now enforce: we need at least one extractable text block to
             # continue. Fail loudly with an actionable message rather than
@@ -448,6 +538,19 @@ class PipelineService:
             if not os.path.exists(output_pdf_path):
                 raise Exception(f"Output PDF was not created at: {output_pdf_path}")
 
+            expected_output_page_count = (
+                source_page_count
+                if file_type == FileType.PDF and source_page_count is not None
+                else max(1, len(layout_data))
+            )
+            translated_page_count = self._require_pdf_page_count(
+                output_pdf_path,
+                expected_output_page_count,
+                "Translated PDF",
+            )
+            job.metadata["translated_page_count"] = translated_page_count
+            self._persist_job(job)
+
             safe_print(f"[Pipeline] Output PDF created: {output_pdf_path} ({os.path.getsize(output_pdf_path)} bytes)")
 
             # Phase 5: Create bilingual preview
@@ -455,15 +558,15 @@ class PipelineService:
             self._set_job_phase(job, "preview_generation")
             
             preview_dir = os.path.join(self.file_service.get_job_dir(job_id), "preview")
-            # Cap at 20 pages to keep preview generation bounded for large PDFs.
-            # The /preview endpoint reports every generated page, so the
-            # frontend viewer can paginate up to this limit.
             original_previews = []
             translated_previews = []
             try:
                 original_preview_source = input_file_path if file_type == FileType.PDF else output_pdf_path
                 original_previews = self.reconstruction_service.create_preview_images(
-                    original_preview_source, preview_dir, max_pages=20, prefix="original"
+                    original_preview_source,
+                    preview_dir,
+                    max_pages=expected_output_page_count,
+                    prefix="original",
                 )
             except Exception as exc:
                 job.metadata.setdefault("preview_warnings", []).append(
@@ -471,7 +574,10 @@ class PipelineService:
                 )
             try:
                 translated_previews = self.reconstruction_service.create_preview_images(
-                    output_pdf_path, preview_dir, max_pages=20, prefix="translated"
+                    output_pdf_path,
+                    preview_dir,
+                    max_pages=translated_page_count,
+                    prefix="translated",
                 )
             except Exception as exc:
                 job.metadata.setdefault("preview_warnings", []).append(
@@ -480,6 +586,8 @@ class PipelineService:
             
             job.metadata["preview_original"] = original_previews
             job.metadata["preview_translated"] = translated_previews
+            job.metadata["preview_original_page_count"] = len(original_previews)
+            job.metadata["preview_translated_page_count"] = len(translated_previews)
             self._persist_job(job)
 
             # Phase 6: Create bilingual PDF
@@ -488,12 +596,17 @@ class PipelineService:
             
             bilingual_path = self.file_service.get_output_path(job_id, "bilingual.pdf")
             if file_type == FileType.PDF:
-                self.reconstruction_service.create_bilingual_pdf(
+                bilingual_created = self.reconstruction_service.create_bilingual_pdf(
                     input_file_path,
                     output_pdf_path,
                     bilingual_path
                 )
-                job.metadata["bilingual_pdf"] = bilingual_path
+                if bilingual_created:
+                    job.metadata["bilingual_pdf"] = bilingual_path
+                else:
+                    job.metadata.setdefault("layout_warnings", []).append(
+                        "Bilingual PDF was not created because page counts did not match."
+                    )
                 self._persist_job(job)
             
             job.status = "completed"
@@ -1482,11 +1595,13 @@ class PipelineService:
                                 )
                             continue
 
+                        line_for_insert = dict(line)
+                        line_for_insert.setdefault("block_bbox", block.get("bbox"))
                         self.reconstruction_service._insert_text_in_rect(
                             page,
                             rect,
                             clean_invisible_unicode(translated),
-                            line,
+                            line_for_insert,
                             layout_warnings,
                             page_idx + 1,
                             block_idx,

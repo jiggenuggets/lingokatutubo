@@ -93,6 +93,16 @@ def _database_config() -> dict:
         return {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": os.environ.get("SQLITE_DATABASE_PATH", BASE_DIR / "db.sqlite3"),
+            # Background translation jobs run on a worker thread (see
+            # LINGOKATUTUBO_TASK_MODE=thread) and write to the DB concurrently
+            # with the request thread. SQLite's default DEFERRED transactions
+            # acquire the write lock lazily on the first write, so two threads
+            # that both start with a read (e.g. update_or_create) can race for
+            # the upgrade and get "database is locked" immediately, without
+            # waiting out the busy timeout. transaction_mode="IMMEDIATE" makes
+            # every transaction grab the write lock upfront so the second
+            # writer queues (up to `timeout` seconds) instead of erroring.
+            "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE"},
         }
 
     return {
@@ -206,3 +216,20 @@ if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = "DENY"
+
+
+def _enable_sqlite_wal(sender, connection, **kwargs):
+    """Let translation-job writes from the worker thread queue instead of
+    raising 'database is locked' against the request thread (see OPTIONS
+    timeout above for why this matters under LINGOKATUTUBO_TASK_MODE=thread).
+    """
+    if connection.vendor != "sqlite":
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+
+
+from django.db.backends.signals import connection_created  # noqa: E402
+
+connection_created.connect(_enable_sqlite_wal)

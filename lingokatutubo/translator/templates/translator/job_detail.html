@@ -20,6 +20,8 @@
     </div>
   </header>
 
+  {% include "translator/partials/_action_bar.html" with job=job can_preview=can_preview can_download=can_download %}
+
   <section class="job-detail-layout">
     <div class="document-thumb large {{ file_icon_class }}" aria-hidden="true">
       {% if thumbnail_url %}
@@ -231,36 +233,6 @@
           <span>Processing is still running. Preview and download will appear when the translated output is ready.</span>
         </div>
       {% endif %}
-
-      <div class="job-detail-actions">
-        <div class="job-detail-actions-primary">
-          <a class="button secondary" href="{% url 'translator:history' %}">← History</a>
-
-          {% if can_preview %}
-            <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Opening Bilingual Preview…" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
-          {% else %}
-            <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Opening Bilingual Preview…" href="{% url 'translator:job_preview' job.id %}" hidden></a>
-          {% endif %}
-
-          {% if can_download %}
-            <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}">Download</a>
-          {% else %}
-            <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}" hidden></a>
-          {% endif %}
-
-          {% if can_retry %}
-            <button class="button secondary" type="button">Retry Translation</button>
-          {% endif %}
-        </div>
-
-        <div class="job-detail-actions-danger">
-          <a class="button danger-outline" href="{% url 'translator:job_delete_confirm' job.id %}"
-             aria-label="Remove this document from history">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
-            Remove from History
-          </a>
-        </div>
-      </div>
     </section>
   </section>
 </main>

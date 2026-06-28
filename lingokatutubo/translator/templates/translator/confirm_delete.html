@@ -53,7 +53,7 @@
         </a>
         <form method="post" action="{% url 'translator:job_delete' job.id %}">
           {% csrf_token %}
-          <button type="submit" class="button danger" id="confirm-delete-submit">
+          <button type="submit" class="button danger-outline" id="confirm-delete-submit">
             Remove from History
           </button>
         </form>

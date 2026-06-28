@@ -18,6 +18,24 @@ class ReconstructionService:
     LINE_HEIGHT_FACTOR = 1.12
     HEAVY_SHRINK_RATIO = 0.72
     FALLBACK_REVIEW_TEXT = ""
+    BASE14_FONT_ALIASES = {
+        "helv": "helv",
+        "helvetica": "helv",
+        "arial": "helv",
+        "arialmt": "helv",
+        "calibri": "helv",
+        "segoeui": "helv",
+        "times": "tiro",
+        "timesroman": "tiro",
+        "times-roman": "tiro",
+        "timesnewroman": "tiro",
+        "timesnewromanpsmt": "tiro",
+        "tiro": "tiro",
+        "cour": "cour",
+        "courier": "cour",
+        "couriernew": "cour",
+        "couriernewpsmt": "cour",
+    }
     _unicode_fontfile_checked = False
     _unicode_fontfile_path: Optional[str] = None
 
@@ -145,22 +163,93 @@ class ReconstructionService:
         return color
 
     @staticmethod
-    def _fontname_for_line(line: Dict[str, Any]) -> str:
+    def _first_text_span(line: Dict[str, Any]) -> Dict[str, Any]:
         spans = line.get("spans") or []
-        span = spans[0] if spans else {}
-        font_label = str(line.get("font") or span.get("font") or "").lower()
+        return next(
+            (
+                span
+                for span in spans
+                if clean_invisible_unicode(span.get("text", "")).strip()
+            ),
+            spans[0] if spans else {},
+        )
+
+    @staticmethod
+    def _font_label_for_line(line: Dict[str, Any]) -> str:
+        span = ReconstructionService._first_text_span(line)
+        return str(line.get("font") or span.get("font") or "")
+
+    @staticmethod
+    def _font_flags_for_line(line: Dict[str, Any]) -> int:
+        span = ReconstructionService._first_text_span(line)
         flags = line.get("flags")
         if flags is None:
             flags = span.get("flags", 0)
         try:
-            flags = int(flags or 0)
+            return int(flags or 0)
         except Exception:
-            flags = 0
+            return 0
 
-        is_bold = "bold" in font_label or "black" in font_label or bool(flags & 16)
-        is_italic = "italic" in font_label or "oblique" in font_label or bool(flags & 2)
+    @staticmethod
+    def _font_label_key(font_label: str) -> str:
+        if "+" in font_label and font_label.split("+", 1)[0].isupper():
+            font_label = font_label.split("+", 1)[1]
+        return (
+            font_label.lower()
+            .replace(" ", "")
+            .replace("_", "")
+            .replace(",", "")
+            .replace(".", "")
+        )
 
-        if "mono" in font_label or "courier" in font_label or bool(flags & 8):
+    @classmethod
+    def _font_style_for_line(cls, line: Dict[str, Any]) -> Dict[str, Any]:
+        font_label = cls._font_label_for_line(line)
+        font_key = cls._font_label_key(font_label)
+        flags = cls._font_flags_for_line(line)
+
+        is_bold = (
+            "bold" in font_key
+            or "black" in font_key
+            or "heavy" in font_key
+            or bool(flags & 16)
+        )
+        is_italic = (
+            "italic" in font_key
+            or "oblique" in font_key
+            or bool(flags & 2)
+        )
+        is_mono = (
+            "mono" in font_key
+            or "courier" in font_key
+            or "consolas" in font_key
+            or bool(flags & 8)
+        )
+        is_serif = (
+            "times" in font_key
+            or "serif" in font_key
+            or "cambria" in font_key
+            or "georgia" in font_key
+            or "garamond" in font_key
+            or "palatino" in font_key
+            or bool(flags & 4)
+        )
+
+        return {
+            "font_label": font_label,
+            "font_key": font_key,
+            "family": "mono" if is_mono else "serif" if is_serif else "sans",
+            "bold": is_bold,
+            "italic": is_italic,
+        }
+
+    @classmethod
+    def _fallback_fontname_for_style(cls, style: Dict[str, Any]) -> str:
+        is_bold = bool(style.get("bold"))
+        is_italic = bool(style.get("italic"))
+        family = style.get("family")
+
+        if family == "mono":
             if is_bold and is_italic:
                 return "cobi"
             if is_bold:
@@ -169,7 +258,7 @@ class ReconstructionService:
                 return "coit"
             return "cour"
 
-        if "times" in font_label or "serif" in font_label or bool(flags & 4):
+        if family == "serif":
             if is_bold and is_italic:
                 return "tibi"
             if is_bold:
@@ -185,6 +274,73 @@ class ReconstructionService:
         if is_italic:
             return "heit"
         return "helv"
+
+    @classmethod
+    def _fontname_for_line(cls, line: Dict[str, Any]) -> str:
+        return cls._fallback_fontname_for_style(cls._font_style_for_line(line))
+
+    @classmethod
+    def _font_candidates_for_line(
+        cls,
+        line: Dict[str, Any],
+        unicode_fontfile: Optional[str] = None,
+    ) -> List[Tuple[str, Optional[str]]]:
+        if unicode_fontfile:
+            return [("LinguaSans", unicode_fontfile)]
+
+        style = cls._font_style_for_line(line)
+        fallback = cls._fallback_fontname_for_style(style)
+        candidates: List[Tuple[str, Optional[str]]] = []
+
+        alias = cls.BASE14_FONT_ALIASES.get(str(style.get("font_key") or ""))
+        if alias:
+            candidates.append((alias, None))
+
+        font_label = clean_invisible_unicode(style.get("font_label", "")).strip()
+        if font_label:
+            if "+" in font_label and font_label.split("+", 1)[0].isupper():
+                font_label = font_label.split("+", 1)[1]
+            candidates.append((font_label, None))
+
+        candidates.extend([(fallback, None), ("helv", None)])
+
+        unique: List[Tuple[str, Optional[str]]] = []
+        seen = set()
+        for fontname, fontfile in candidates:
+            key = (fontname, fontfile)
+            if fontname and key not in seen:
+                unique.append(key)
+                seen.add(key)
+        return unique
+
+    @classmethod
+    def _text_alignment_for_line(
+        cls,
+        line: Dict[str, Any],
+        rect: fitz.Rect,
+        page_rect: fitz.Rect,
+    ) -> int:
+        explicit = str(
+            line.get("align") or line.get("alignment") or line.get("text_align") or ""
+        ).strip().lower()
+        if explicit in {"center", "middle", "centre"}:
+            return fitz.TEXT_ALIGN_CENTER
+        if explicit in {"right", "end"}:
+            return fitz.TEXT_ALIGN_RIGHT
+
+        block_rect = cls._rect_from_bbox(line.get("block_bbox"), page_rect)
+        if not block_rect or block_rect.width <= rect.width + 4:
+            return fitz.TEXT_ALIGN_LEFT
+
+        tolerance = max(6.0, block_rect.width * 0.08)
+        rect_center = (rect.x0 + rect.x1) / 2.0
+        block_center = (block_rect.x0 + block_rect.x1) / 2.0
+
+        if abs(rect.x1 - block_rect.x1) <= tolerance:
+            return fitz.TEXT_ALIGN_RIGHT
+        if abs(rect_center - block_center) <= tolerance:
+            return fitz.TEXT_ALIGN_CENTER
+        return fitz.TEXT_ALIGN_LEFT
 
     @classmethod
     def _unicode_fontfile(cls) -> Optional[str]:
@@ -387,6 +543,7 @@ class ReconstructionService:
             )
             return False
         fontname = cls._fontname_for_line(line)
+        page_rect = page.rect
         unicode_fontfile = cls._unicode_fontfile() if cls._needs_unicode_font(text) else None
         if unicode_fontfile:
             cls._append_warning(
@@ -456,20 +613,16 @@ class ReconstructionService:
             block_number,
             line_number,
         )
-        candidates: List[Tuple[str, Optional[str]]] = (
-            [("LinguaSans", unicode_fontfile)]
-            if unicode_fontfile
-            else [(fontname, None), ("helv", None)]
-        )
+        align = cls._text_alignment_for_line(line, rect, page_rect)
+        candidates = cls._font_candidates_for_line(line, unicode_fontfile)
 
         last_exception: Optional[Exception] = None
-        page_rect = page.rect
         for candidate_font, candidate_fontfile in candidates:
             insert_args = {
                 "fontsize": fontsize,
                 "fontname": candidate_font,
                 "color": color,
-                "align": fitz.TEXT_ALIGN_LEFT,
+                "align": align,
                 "overlay": True,
             }
             if candidate_fontfile:
@@ -657,8 +810,19 @@ class ReconstructionService:
         Returns:
             True if successful
         """
+        doc = None
         try:
             doc = fitz.open(input_pdf_path)
+            layout_page_count = len(layout_data or [])
+            if layout_page_count != doc.page_count:
+                ReconstructionService._append_warning(
+                    layout_warnings,
+                    "Source PDF has "
+                    f"{doc.page_count} page(s), but extracted layout has "
+                    f"{layout_page_count} page(s); exact reconstruction was "
+                    "skipped because not every page can be translated safely.",
+                )
+                return False
 
             # Process each page
             for page_num, page_layout in enumerate(layout_data):
@@ -747,11 +911,13 @@ class ReconstructionService:
                             )
                             continue
 
+                        line_for_insert = dict(line)
+                        line_for_insert.setdefault("block_bbox", block.get("bbox"))
                         tasks.append({
                             "rect": rect,
                             "translated_text": translated_text,
                             "source_text": original_text,
-                            "line": line,
+                            "line": line_for_insert,
                             "block_idx": block_idx,
                             "line_idx": line_idx,
                         })
@@ -849,6 +1015,9 @@ class ReconstructionService:
         except Exception as e:
             safe_print(f"[Reconstruction] Error reconstructing PDF: {e}")
             return False
+        finally:
+            if doc is not None and not getattr(doc, "is_closed", False):
+                doc.close()
     
     @staticmethod
     def create_bilingual_pdf(
@@ -867,22 +1036,28 @@ class ReconstructionService:
         Returns:
             True if successful
         """
+        original_doc = None
+        translated_doc = None
+        output_doc = None
         try:
             original_doc = fitz.open(original_pdf_path)
             translated_doc = fitz.open(translated_pdf_path)
             output_doc = fitz.open()
-            
-            page_count = min(original_doc.page_count, translated_doc.page_count)
+
+            if original_doc.page_count != translated_doc.page_count:
+                safe_print(
+                    "[Reconstruction] Bilingual PDF skipped: original has "
+                    f"{original_doc.page_count} page(s), translated has "
+                    f"{translated_doc.page_count} page(s)"
+                )
+                return False
+
+            page_count = original_doc.page_count
             
             # Alternate pages: original, translated, original, translated...
             for i in range(page_count):
-                # Add original page
-                orig_page = original_doc[i]
                 output_doc.insert_pdf(original_doc, from_page=i, to_page=i)
-                
-                # Add translated page
-                if i < translated_doc.page_count:
-                    output_doc.insert_pdf(translated_doc, from_page=i, to_page=i)
+                output_doc.insert_pdf(translated_doc, from_page=i, to_page=i)
             
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             output_doc.save(output_path)
@@ -895,6 +1070,10 @@ class ReconstructionService:
         except Exception as e:
             safe_print(f"[Reconstruction] Error creating bilingual PDF: {e}")
             return False
+        finally:
+            for pdf_doc in (output_doc, translated_doc, original_doc):
+                if pdf_doc is not None and not getattr(pdf_doc, "is_closed", False):
+                    pdf_doc.close()
     
     @staticmethod
     def create_preview_images(

@@ -69,12 +69,9 @@
     </header>
 
     {% if messages %}
-      <div class="messages" role="list" aria-label="Notifications">
+      <div class="messages" id="messages-region" aria-label="Notifications">
         {% for message in messages %}
-          <div class="message {{ message.tags }}" role="listitem" aria-live="polite">
-            <span>{{ message }}</span>
-            <button class="message-dismiss" type="button" aria-label="Dismiss notification">&#x2715;</button>
-          </div>
+          {% include "translator/partials/_status_banner.html" %}
         {% endfor %}
       </div>
     {% endif %}
@@ -108,7 +105,7 @@
     <div id="page-transition-overlay" class="page-transition-overlay" aria-hidden="true">
       <div class="page-transition-spinner" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
-        <p id="page-transition-text">Opening Bilingual Preview&hellip;</p>
+        <p id="page-transition-text">Preparing bilingual preview&hellip;</p>
       </div>
     </div>
 

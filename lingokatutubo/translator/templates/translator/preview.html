@@ -53,20 +53,20 @@
         {% endif %}
       </strong>
     </div>
-    {% if extraction_method == "ocr_image" %}
-      <div>
-        <span>OCR Confidence</span>
-        <strong>
-          {% if ocr_confidence_pct is not None %}
-            {{ ocr_confidence_pct }}%
-            {% if ocr_has_low_quality %}<span class="badge-warning">Low</span>{% endif %}
-          {% else %}
-            <span class="text-muted">Not computed</span>
-          {% endif %}
-        </strong>
-      </div>
-    {% endif %}
     {% if request.user.is_staff or request.user.is_superuser %}
+      {% if extraction_method == "ocr_image" %}
+        <div>
+          <span>OCR Confidence</span>
+          <strong>
+            {% if ocr_confidence_pct is not None %}
+              {{ ocr_confidence_pct }}%
+              {% if ocr_has_low_quality %}<span class="badge-warning">Low</span>{% endif %}
+            {% else %}
+              <span class="text-muted">Not computed</span>
+            {% endif %}
+          </strong>
+        </div>
+      {% endif %}
       <div>
         <span>Needs Review</span>
         <strong>
@@ -86,21 +86,31 @@
         <h2 id="document-preview-heading">Document Preview</h2>
         <p class="section-subtitle">Original and translated pages are aligned by page number.</p>
       </div>
-      {% if image_preview.page_count %}
-        <span class="segment-count-badge">{{ image_preview.page_count }} page{{ image_preview.page_count|pluralize }}</span>
-      {% endif %}
+      <div class="preview-title-actions">
+        {% if image_preview.page_count %}
+          <span class="segment-count-badge">{{ image_preview.page_count }} page{{ image_preview.page_count|pluralize }}</span>
+        {% endif %}
+        <div class="preview-zoom-controls" aria-label="Preview zoom controls">
+          <button class="preview-zoom-button is-active" type="button" data-preview-zoom-action="fit" aria-pressed="true">Fit Width</button>
+          <button class="preview-zoom-button" type="button" data-preview-zoom-action="out" aria-label="Zoom out">Zoom Out</button>
+          <button class="preview-zoom-button" type="button" data-preview-zoom-action="in" aria-label="Zoom in">Zoom In</button>
+          <button class="preview-zoom-button" type="button" data-preview-zoom-action="reset">Reset Zoom</button>
+        </div>
+      </div>
     </div>
 
-    <section class="bilingual-document-preview" aria-label="Bilingual document preview">
-      <article class="document-panel" aria-labelledby="original-document-heading">
-        <header class="document-panel-header">
-          <h3 id="original-document-heading">Original Document</h3>
-        </header>
-        <div class="document-panel-body">
-          {% if image_preview.page_pairs %}
-            {% for page in image_preview.page_pairs %}
-              <section class="document-page-card" aria-label="Original page {{ page.number }}">
-                <div class="document-page-label">Page {{ page.number }}</div>
+    <section class="bilingual-document-preview is-fit-width" data-preview-scope aria-label="Bilingual document preview">
+      <div class="document-compare-headers" aria-hidden="true">
+        <header class="document-panel-header"><h3>Original Document</h3></header>
+        <header class="document-panel-header"><h3>Translated Document</h3></header>
+      </div>
+
+      {% if image_preview.page_pairs %}
+        {% for page in image_preview.page_pairs %}
+          <section class="document-page-card" aria-label="Page {{ page.number }} comparison">
+            <div class="document-page-row-grid">
+              <div class="document-page-col" aria-label="Original page {{ page.number }}">
+                <p class="document-page-label">Original Document &middot; Page {{ page.number }}</p>
                 {% if page.original_url %}
                   <img class="document-page-image" src="{{ page.original_url }}" alt="Original page {{ page.number }} preview">
                 {% elif page.original_text %}
@@ -108,26 +118,9 @@
                 {% else %}
                   <p class="empty-preview">No original preview for this page.</p>
                 {% endif %}
-              </section>
-            {% endfor %}
-          {% else %}
-            <div class="empty-state empty-state-inline">
-              <h3 class="empty-state-title">No original preview available</h3>
-              <p class="empty-state-body">The original document preview is not available for this page.</p>
-            </div>
-          {% endif %}
-        </div>
-      </article>
-
-      <article class="document-panel" aria-labelledby="translated-document-heading">
-        <header class="document-panel-header">
-          <h3 id="translated-document-heading">Translated Document</h3>
-        </header>
-        <div class="document-panel-body">
-          {% if image_preview.page_pairs %}
-            {% for page in image_preview.page_pairs %}
-              <section class="document-page-card" aria-label="Translated page {{ page.number }}">
-                <div class="document-page-label">Page {{ page.number }}</div>
+              </div>
+              <div class="document-page-col" aria-label="Translated page {{ page.number }}">
+                <p class="document-page-label">Translated Document &middot; Page {{ page.number }}</p>
                 {% if page.translated_url %}
                   <img class="document-page-image" src="{{ page.translated_url }}" alt="Translated page {{ page.number }} preview">
                 {% elif page.translated_text %}
@@ -135,16 +128,28 @@
                 {% else %}
                   <p class="empty-preview">No translated preview for this page.</p>
                 {% endif %}
-              </section>
-            {% endfor %}
-          {% else %}
-            <div class="empty-state empty-state-inline">
-              <h3 class="empty-state-title">No translated preview available</h3>
-              <p class="empty-state-body">The translated document preview is not available for this page.</p>
+              </div>
             </div>
-          {% endif %}
-        </div>
-      </article>
+          </section>
+        {% endfor %}
+      {% else %}
+        <section class="document-page-card" aria-label="No pages available">
+          <div class="document-page-row-grid">
+            <div class="document-page-col">
+              <div class="empty-state empty-state-inline">
+                <h3 class="empty-state-title">No original preview available</h3>
+                <p class="empty-state-body">The original document preview is not available for this page.</p>
+              </div>
+            </div>
+            <div class="document-page-col">
+              <div class="empty-state empty-state-inline">
+                <h3 class="empty-state-title">No translated preview available</h3>
+                <p class="empty-state-body">The translated document preview is not available for this page.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      {% endif %}
     </section>
   </section>
 

@@ -1,0 +1,23 @@
+<div class="top-action-bar" role="toolbar" aria-label="Document actions">
+  <div class="top-action-bar-primary">
+    <a class="button secondary" href="{% url 'translator:history' %}">&larr; History</a>
+
+    {% if can_preview %}
+      <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Preparing bilingual preview&hellip;" href="{% url 'translator:job_preview' job.id %}">Preview Bilingual</a>
+    {% else %}
+      <a id="job-preview-action" class="button primary js-preview-link" data-loading-text="Preparing bilingual preview&hellip;" href="{% url 'translator:job_preview' job.id %}" hidden></a>
+    {% endif %}
+
+    {% if can_download %}
+      <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}">Download</a>
+    {% else %}
+      <a id="job-download-action" class="button secondary" href="{% url 'translator:job_download' job.id %}" hidden></a>
+    {% endif %}
+  </div>
+
+  <div class="top-action-bar-danger">
+    <a class="button danger-outline" href="{% url 'translator:job_delete_confirm' job.id %}" aria-label="Remove this document from history">
+      Remove
+    </a>
+  </div>
+</div>

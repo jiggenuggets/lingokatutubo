@@ -35,32 +35,19 @@ User = get_user_model()
 
 
 class _PreviewStructureParser(HTMLParser):
-    """Track the direct panel children inside the bilingual preview grid."""
+    """Track the bilingual preview container, its header bar, and per-page rows.
 
-    _VOID_TAGS = {
-        "area",
-        "base",
-        "br",
-        "col",
-        "embed",
-        "hr",
-        "img",
-        "input",
-        "link",
-        "meta",
-        "param",
-        "source",
-        "track",
-        "wbr",
-    }
+    The preview lays out original/translated pages as one row per page
+    (instead of two independently-scrolling panels) so they stay aligned by
+    page number. This tracks that shape: exactly one container, one header
+    pair (Original/Translated labels), and one row per page.
+    """
 
     def __init__(self):
         super().__init__()
         self.container_count = 0
-        self.direct_panel_count = 0
-        self.direct_panel_header_count = 0
-        self._inside_preview = False
-        self._preview_depth = None
+        self.header_count = 0
+        self.row_count = 0
 
     @staticmethod
     def _classes(attrs):
@@ -73,28 +60,10 @@ class _PreviewStructureParser(HTMLParser):
         classes = self._classes(attrs)
         if "bilingual-document-preview" in classes:
             self.container_count += 1
-            if not self._inside_preview:
-                self._inside_preview = True
-                self._preview_depth = 0
-            return
-
-        if not self._inside_preview or tag in self._VOID_TAGS:
-            return
-
-        self._preview_depth += 1
-        if self._preview_depth == 1 and tag == "article" and "document-panel" in classes:
-            self.direct_panel_count += 1
-        if self._preview_depth == 2 and tag == "header" and "document-panel-header" in classes:
-            self.direct_panel_header_count += 1
-
-    def handle_endtag(self, tag):
-        if not self._inside_preview or tag in self._VOID_TAGS:
-            return
-        if self._preview_depth == 0:
-            self._inside_preview = False
-            self._preview_depth = None
-            return
-        self._preview_depth -= 1
+        if tag == "header" and "document-panel-header" in classes:
+            self.header_count += 1
+        if "document-page-card" in classes:
+            self.row_count += 1
 
 
 class TranslatorAuthAndJobTests(TestCase):
@@ -473,8 +442,8 @@ class TranslatorAuthAndJobTests(TestCase):
         parser = _PreviewStructureParser()
         parser.feed(body)
         self.assertEqual(parser.container_count, 1)
-        self.assertEqual(parser.direct_panel_count, 2)
-        self.assertEqual(parser.direct_panel_header_count, 2)
+        self.assertEqual(parser.header_count, 2)
+        self.assertEqual(parser.row_count, 1)
         # Normal (non-staff) users never see the technical segment table.
         self.assertNotIn("View Segment Details", body)
         self.assertNotIn("Bilingual aligned segment details", body)
@@ -482,6 +451,63 @@ class TranslatorAuthAndJobTests(TestCase):
         self.assertNotIn("Confidence 0.88", body)
         self.assertNotIn("Needs review", body)
         self.assertNotIn("Needs Review", body)
+
+    def test_mixed_known_and_unknown_segments_render_correctly_in_preview(self):
+        """Phase 8 regression check: a job with one known phrasebook segment
+        and one unsupported segment must, after all the UI/template changes,
+        still (a) translate the known segment, (b) keep the unknown
+        segment's original text visible rather than dropping or hallucinating
+        it, and (c) flag the unknown segment for review — for staff and
+        non-staff users alike."""
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=1,
+            source_text="Hello",
+            translated_text="Madigár",
+            source_language="english",
+            target_language="tagabawa",
+            method="exact_phrase",
+            confidence=1.0,
+            needs_review=False,
+        )
+        TranslationSegment.objects.create(
+            job=job,
+            segment_index=2,
+            source_text="This sentence is not in the dataset.",
+            translated_text="",
+            source_language="english",
+            target_language="tagabawa",
+            method="unknown_for_review",
+            confidence=0.0,
+            needs_review=True,
+        )
+
+        # Non-staff: known segment translates, unknown segment's original
+        # text remains visible (not dropped, not hallucinated), and no
+        # technical review markers leak through.
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("Madigár", body)
+        self.assertIn("This sentence is not in the dataset.", body)
+        self.assertNotIn("unknown_for_review", body)
+        self.assertNotIn("[UNKNOWN_FOR_REVIEW]", body)
+        self.assertNotIn("Needs Review", body)
+        self.assertNotIn("Needs review", body)
+
+        # Staff: same content, plus the technical segment table showing the
+        # known segment's method/confidence and the unknown segment flagged
+        # for review with its original text (never fabricated).
+        self.alice.is_staff = True
+        self.alice.save(update_fields=["is_staff"])
+        staff_response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+        staff_body = staff_response.content.decode("utf-8")
+        self.assertIn("Madigár", staff_body)
+        self.assertIn("exact_phrase", staff_body)
+        self.assertIn("This sentence is not in the dataset.", staff_body)
+        self.assertIn("needs-review", staff_body)
 
     def test_preview_renders_translated_panel_when_translated_preview_missing(self):
         job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
@@ -494,7 +520,8 @@ class TranslatorAuthAndJobTests(TestCase):
         parser = _PreviewStructureParser()
         parser.feed(body)
         self.assertEqual(parser.container_count, 1)
-        self.assertEqual(parser.direct_panel_count, 2)
+        self.assertEqual(parser.header_count, 2)
+        self.assertEqual(parser.row_count, 1)
         self.assertIn("Original Document", body)
         self.assertIn("Translated Document", body)
         self.assertIn("No translated preview available", body)
@@ -505,14 +532,56 @@ class TranslatorAuthAndJobTests(TestCase):
         css_path = Path(__file__).resolve().parent.parent / "static" / "css" / "styles.css"
         css = css_path.read_text(encoding="utf-8")
 
-        self.assertIn(".document-panel svg", css)
+        self.assertIn(".document-page-col svg", css)
         self.assertIn("flex-direction: column", css)
         self.assertIn("flex: 0 0 auto", css)
+        self.assertIn("--preview-card-width: 100%", css)
+        self.assertIn("width: var(--preview-card-width)", css)
+        self.assertIn(".document-page-image", css)
+        self.assertIn("width: 100%", css)
         self.assertIn("max-width: 100% !important", css)
-        self.assertIn("max-height: min(62vh, 560px)", css)
+        self.assertNotIn("max-height: min(62vh, 560px)", css)
         self.assertIn(".preview-document-page", css)
-        self.assertIn(".document-panel .pdf-page", css)
+        self.assertIn(".document-page-col .pdf-page", css)
         self.assertIn("transform-origin: top center", css)
+        self.assertIn(".document-page-row-grid", css)
+        self.assertIn(".document-compare-headers", css)
+        # Original/translated panels no longer scroll independently of each
+        # other — pages are aligned by page number in a single shared flow.
+        self.assertNotIn(".document-panel-body", css)
+
+    def test_preview_renders_fit_width_zoom_controls(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn('data-preview-scope', body)
+        self.assertIn('data-preview-zoom-action="fit"', body)
+        self.assertIn("Fit Width", body)
+        self.assertIn("Zoom In", body)
+        self.assertIn("Zoom Out", body)
+        self.assertIn("Reset Zoom", body)
+
+    def test_preview_page_count_uses_pipeline_metadata_when_images_missing(self):
+        job = self._create_job(self.alice, status=TranslationJob.Status.COMPLETED)
+        job.metadata = {
+            "source_page_count": 3,
+            "translated_page_count": 3,
+            "layout_page_count": 3,
+        }
+        job.save(update_fields=["metadata"])
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("3 pages", body)
+        self.assertIn("Original page 3", body)
+        self.assertIn("Translated page 3", body)
 
     def test_preview_segment_details_visible_to_staff(self):
         """Staff/admin still get the full technical segment table."""
@@ -1029,6 +1098,30 @@ class TranslatorAuthAndJobTests(TestCase):
 
 
 class TranslatorPhase5BPipelineTests(TestCase):
+    def test_pipeline_marks_ocr_failed_pages_as_incomplete_translation(self):
+        from translator.services.pipeline_service import PipelineService
+
+        warnings = PipelineService._untranslated_page_warnings([
+            {
+                "page": 0,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "lines": [{"text": "Page one source"}],
+                    }
+                ],
+            },
+            {
+                "page": 1,
+                "blocks": [],
+                "ocr_error": "image too faded to process",
+            },
+        ])
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Page 2", warnings[0])
+        self.assertIn("image too faded to process", warnings[0])
+
     def test_bilingual_first_page_uses_line_specific_translation_metadata(self):
         from translator.services.pipeline_service import PipelineService
         from translator.services.translation_dataset import UNKNOWN_FOR_REVIEW
@@ -2123,6 +2216,299 @@ class TranslatorUICleanlinessTests(TestCase):
         self.assertNotIn("45%", body)
         self.assertNotIn("⚠ Low", body)
         self.assertNotIn("Technical Details", body)
+
+
+class TranslatorUIRefreshTests(TestCase):
+    """Recent/history card simplification, completion notification, top
+    action bar, and preview loading-state hook (UI-only changes; no OCR,
+    dataset, ByT5, or reconstruction logic is exercised here)."""
+
+    password = "Bagobo-UI-Refresh-2026!"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.temp_dir.name)
+        self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.alice = User.objects.create_user(
+            username="ui_refresh_alice",
+            email="ui_refresh_alice@example.test",
+            password=self.password,
+        )
+
+    def _create_job(self, status):
+        return TranslationJob.objects.create(
+            owner=self.alice,
+            original_filename="ui_refresh.pdf",
+            file_type=TranslationJob.FileType.PDF,
+            status=status,
+        )
+
+    # ---- Phase 1: recent/history card simplification ----
+
+    def test_completed_job_history_card_shows_preview_only(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        out = self.media_root / "jobs" / job.job_id / "translated.pdf"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"%PDF-1.4\n%%EOF")
+        job.output_file_path = str(out)
+        job.save(update_fields=["output_file_path"])
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("document-card-action", body)
+        self.assertIn(">Preview<", body)
+        self.assertNotIn(">Download<", body)
+        self.assertNotIn(">Remove<", body)
+
+    def test_processing_job_history_card_has_no_preview_link(self):
+        self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertNotIn(">Preview<", body)
+        self.assertIn("Preview available once processing completes.", body)
+
+    def test_failed_job_history_card_shows_failed_indicator_not_preview(self):
+        self._create_job(TranslationJob.Status.FAILED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:history"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertNotIn(">Preview<", body)
+        self.assertIn("Translation failed safely.", body)
+
+    def test_completed_job_recent_sidebar_card_shows_preview_only(self):
+        self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:translate"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn(">Preview<", body)
+        self.assertNotIn(">Download<", body)
+
+    # ---- Phase 2: completion notification ----
+
+    def test_completed_job_detail_shows_ready_message_once_per_session(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        first = self.client.get(reverse("translator:job_detail", args=[job.id]))
+        second = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertIn("Translated file is ready.", first.content.decode("utf-8"))
+        self.assertNotIn("Translated file is ready.", second.content.decode("utf-8"))
+
+    def test_ready_message_uses_accessible_status_markup(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        message_start = body.index("Translated file is ready.")
+        message_region = body[max(0, message_start - 200):message_start]
+        self.assertIn('role="status"', message_region)
+        self.assertIn('aria-live="polite"', message_region)
+        self.assertIn("message-dismiss", body)
+
+    def test_failed_job_detail_never_shows_ready_message(self):
+        job = self._create_job(TranslationJob.Status.FAILED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertNotIn("Translated file is ready.", response.content.decode("utf-8"))
+
+    def test_processing_job_detail_never_shows_ready_message(self):
+        job = self._create_job(TranslationJob.Status.PROCESSING)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        self.assertNotIn("Translated file is ready.", response.content.decode("utf-8"))
+
+    # ---- Phase 4: top action bar ----
+
+    def test_job_detail_has_top_action_bar_before_layout_section(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        self.assertIn('class="top-action-bar"', body)
+        self.assertIn('class="job-detail-layout"', body)
+        self.assertLess(body.index("top-action-bar"), body.index("job-detail-layout"))
+
+    def test_job_detail_top_action_bar_has_history_preview_and_remove(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        bar_html = body[body.index('class="top-action-bar"'):body.index('class="job-detail-layout"')]
+        self.assertIn("History", bar_html)
+        self.assertIn("Preview Bilingual", bar_html)
+        self.assertIn(reverse("translator:job_delete_confirm", args=[job.id]), bar_html)
+
+    def test_top_action_bar_shows_download_only_when_output_exists(self):
+        job_no_output = self._create_job(TranslationJob.Status.COMPLETED)
+        job_with_output = self._create_job(TranslationJob.Status.COMPLETED)
+        out = self.media_root / "jobs" / job_with_output.job_id / "translated.pdf"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"%PDF-1.4\n%%EOF")
+        job_with_output.output_file_path = str(out)
+        job_with_output.save(update_fields=["output_file_path"])
+        self.client.force_login(self.alice)
+
+        no_output_body = self.client.get(
+            reverse("translator:job_detail", args=[job_no_output.id])
+        ).content.decode("utf-8")
+        with_output_body = self.client.get(
+            reverse("translator:job_detail", args=[job_with_output.id])
+        ).content.decode("utf-8")
+
+        no_output_bar = no_output_body[
+            no_output_body.index('class="top-action-bar"'):no_output_body.index('class="job-detail-layout"')
+        ]
+        with_output_bar = with_output_body[
+            with_output_body.index('class="top-action-bar"'):with_output_body.index('class="job-detail-layout"')
+        ]
+        self.assertNotIn(">Download<", no_output_bar)
+        self.assertIn(">Download<", with_output_bar)
+
+    def test_top_action_bar_failed_job_has_no_preview_bilingual_or_download(self):
+        job = self._create_job(TranslationJob.Status.FAILED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        bar_html = body[body.index('class="top-action-bar"'):body.index('class="job-detail-layout"')]
+        self.assertNotIn("Preview Bilingual", bar_html)
+        self.assertNotIn(">Download<", bar_html)
+        # The danger action stays available regardless of job status.
+        self.assertIn(reverse("translator:job_delete_confirm", args=[job.id]), bar_html)
+
+    # ---- Phase 3: preview loading-state hook ----
+
+    def test_preview_link_carries_preparing_preview_loading_text(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_detail", args=[job.id]))
+
+        body = response.content.decode("utf-8")
+        self.assertIn("js-preview-link", body)
+        self.assertIn("Preparing bilingual preview", body)
+
+    def test_app_js_holds_loading_state_minimum_duration_and_has_no_dead_preview_code(self):
+        js_path = Path(__file__).resolve().parent.parent / "static" / "js" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+
+        self.assertIn("MIN_LOADING_MS = 2500", js)
+        self.assertNotIn("function initPreview()", js)
+        self.assertIn('classList.contains("is-loading")', js)
+
+    def test_page_transition_overlay_has_correct_default_text_and_reduced_motion_css(self):
+        base_html = (
+            Path(__file__).resolve().parent
+            / "templates" / "translator" / "base.html"
+        ).read_text(encoding="utf-8")
+        css = (
+            Path(__file__).resolve().parent.parent / "static" / "css" / "styles.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="page-transition-overlay"', base_html)
+        self.assertIn("Preparing bilingual preview", base_html)
+        self.assertNotIn("Opening Bilingual Preview", base_html)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", css)
+        self.assertIn(".page-transition-spinner .spinner", css)
+
+    # ---- Phase 5: button colors ----
+
+    def test_primary_button_css_has_no_gradient_and_single_danger_style(self):
+        css_path = Path(__file__).resolve().parent.parent / "static" / "css" / "styles.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        # Only the primary *button* rule must drop its gradient — decorative
+        # elements like document-thumb icons may still use one.
+        primary_rule = css[css.index(".button.primary {"):css.index(".button.secondary {")]
+        self.assertNotIn("linear-gradient", primary_rule)
+        self.assertIn("background: var(--primary);", primary_rule)
+        self.assertIn(".button.danger-outline {", css)
+        self.assertNotIn(".button.danger {", css)
+
+    def test_disabled_button_is_muted_gray_not_just_faded_color(self):
+        css_path = Path(__file__).resolve().parent.parent / "static" / "css" / "styles.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        disabled_rule = css[css.index(".button:disabled"):css.index(".button.primary {")]
+        self.assertIn("color: var(--muted);", disabled_rule)
+        self.assertIn("cursor: not-allowed", disabled_rule)
+        # A disabled primary/secondary/danger-outline button must not keep
+        # its variant's own color — it must render as flat muted gray.
+        self.assertIn(".button.primary:disabled", disabled_rule)
+        self.assertIn(".button.secondary:disabled", disabled_rule)
+        self.assertIn(".button.danger-outline:disabled", disabled_rule)
+
+    def test_view_all_link_consolidated_into_button_link(self):
+        css_path = Path(__file__).resolve().parent.parent / "static" / "css" / "styles.css"
+        css = css_path.read_text(encoding="utf-8")
+        translate_html = (
+            Path(__file__).resolve().parent
+            / "templates" / "translator" / "translate.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("view-all-link", css)
+        self.assertNotIn("view-all-link", translate_html)
+        self.assertIn('class="button-link"', translate_html)
+
+    # ---- Phase 6: preview page-row alignment ----
+
+    def test_preview_aligns_pages_in_per_page_rows_with_clear_labels(self):
+        job = self._create_job(TranslationJob.Status.COMPLETED)
+        job.metadata = {
+            "source_page_count": 2,
+            "translated_page_count": 2,
+            "layout_page_count": 2,
+        }
+        job.save(update_fields=["metadata"])
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("translator:job_preview", args=[job.id]))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        # Each page gets its own row with both sides clearly labelled —
+        # original and translated for the same page number stay paired,
+        # instead of each side scrolling through its own independent list.
+        self.assertIn("Original Document &middot; Page 1", body)
+        self.assertIn("Translated Document &middot; Page 1", body)
+        self.assertIn("Original Document &middot; Page 2", body)
+        self.assertIn("Translated Document &middot; Page 2", body)
+        row_one = body.index("Page 1 comparison")
+        row_two = body.index("Page 2 comparison")
+        self.assertLess(row_one, row_two)
+        # Top actions (History / Job Details) must still be reachable
+        # without scrolling past the page rows.
+        self.assertIn("Job Details", body)
+        self.assertLess(body.index("Job Details"), row_one)
 
 
 class TranslatorDocxPaginationTests(TestCase):
@@ -5719,6 +6105,8 @@ class AppendixFBilingualPreviewTests(TestCase):
                 "ocr_summary": {"mean_confidence": 0.92, "has_low_quality_warning": False},
             },
         )
+        self.alice.is_staff = True
+        self.alice.save(update_fields=["is_staff"])
         self.client.force_login(self.alice)
         ocr_response = self.client.get(reverse("translator:job_preview", args=[ocr_job.id]))
         self.assertEqual(ocr_response.status_code, 200)
@@ -5986,9 +6374,12 @@ class AppendixGDownloadTests(TestCase):
                         "Output PDF must exist on disk after _create_output_pdf returns True")
         doc = fitz.open(output_path)
         page_count = doc.page_count
+        full_text = "\n".join(doc[i].get_text() for i in range(doc.page_count))
         doc.close()
         self.assertEqual(page_count, 2,
                          "_create_output_pdf must produce exactly 2 pages for a 2-element layout_data list")
+        self.assertIn("Malinig ang tubig.", full_text)
+        self.assertIn("Mataas ang kagubatan.", full_text)
 
         # Part B — bilingual download path: ?format=bilingual serves the bilingual file
         job = self._create_job(self.alice)
@@ -6013,6 +6404,42 @@ class AppendixGDownloadTests(TestCase):
             )
         finally:
             response.close()
+
+    def test_reconstruct_pdf_rejects_layout_that_omits_source_pages(self):
+        from translator.services.reconstruction_service import ReconstructionService
+
+        source_path = self.media_root / "two_page_source.pdf"
+        source_path.write_bytes(self._minimal_pdf_bytes(page_count=2))
+        output_path = str(self.media_root / "partial_reconstruction.pdf")
+        layout_data = [
+            {
+                "page": 0,
+                "width": 612,
+                "height": 792,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [72, 100, 540, 130],
+                        "lines": [{"text": "Page one only", "bbox": [72, 100, 540, 130]}],
+                    }
+                ],
+            }
+        ]
+        warnings = []
+
+        ok = ReconstructionService.reconstruct_pdf(
+            str(source_path),
+            layout_data,
+            {"Page one only": {"translated": "Translated page one", "method": "exact_phrase"}},
+            output_path,
+            layout_warnings=warnings,
+        )
+
+        self.assertFalse(ok)
+        self.assertFalse(Path(output_path).exists())
+        self.assertTrue(
+            any("not every page can be translated safely" in warning for warning in warnings)
+        )
 
     # ------------------------------------------------------------------ TC-G03
     def test_tc_g03_processing_job_cannot_download(self):
@@ -7935,6 +8362,120 @@ class TranslatorNeuralSyncAndOutputTests(TestCase):
         self.assertIn("Unmatched source text", full_text)
         self.assertNotIn("UNKNOWN_FOR_REVIEW", full_text)
 
+    def test_font_metadata_fallback_mapping_handles_missing_fonts(self):
+        import fitz
+        from translator.services.reconstruction_service import ReconstructionService
+
+        self.assertEqual(
+            ReconstructionService._fontname_for_line({
+                "font": "TimesNewRomanPS-BoldItalicMT",
+                "flags": 4 | 16 | 2,
+            }),
+            "tibi",
+        )
+        self.assertEqual(
+            ReconstructionService._fontname_for_line({
+                "font": "Arial-BoldMT",
+                "flags": 16,
+            }),
+            "hebo",
+        )
+        self.assertEqual(
+            ReconstructionService._fontname_for_line({
+                "font": "CourierNewPS-ItalicMT",
+                "flags": 8 | 2,
+            }),
+            "coit",
+        )
+        self.assertEqual(ReconstructionService._fontname_for_line({}), "helv")
+
+        page_rect = fitz.Rect(0, 0, 612, 792)
+        center_rect = fitz.Rect(240, 100, 372, 122)
+        right_rect = fitz.Rect(470, 100, 540, 122)
+        self.assertEqual(
+            ReconstructionService._text_alignment_for_line(
+                {"block_bbox": [72, 90, 540, 130]},
+                center_rect,
+                page_rect,
+            ),
+            fitz.TEXT_ALIGN_CENTER,
+        )
+        self.assertEqual(
+            ReconstructionService._text_alignment_for_line(
+                {"block_bbox": [72, 90, 540, 130]},
+                right_rect,
+                page_rect,
+            ),
+            fitz.TEXT_ALIGN_RIGHT,
+        )
+
+    def test_translated_pdf_generation_falls_back_when_exact_font_is_unavailable(self):
+        import fitz
+        from translator.services.pipeline_service import PipelineService
+
+        layout = [{
+            "page": 0,
+            "width": 612.0,
+            "height": 792.0,
+            "blocks": [{
+                "type": "text",
+                "bbox": [72.0, 96.0, 540.0, 140.0],
+                "lines": [{
+                    "text": "Styled source",
+                    "bbox": [168.0, 100.0, 444.0, 124.0],
+                    "font": "MissingSubset+FancySerif-BoldItalic",
+                    "size": 16.0,
+                    "flags": 4 | 16 | 2,
+                    "color": [0.1, 0.2, 0.3],
+                    "spans": [{
+                        "text": "Styled source",
+                        "bbox": [168.0, 100.0, 444.0, 124.0],
+                        "font": "MissingSubset+FancySerif-BoldItalic",
+                        "size": 16.0,
+                        "flags": 4 | 16 | 2,
+                        "color": [0.1, 0.2, 0.3],
+                    }],
+                }],
+            }],
+        }]
+        translations = {
+            "Styled source": {
+                "original": "Styled source",
+                "translated": "Styled target",
+                "method": "exact_phrase",
+                "cascade_stage": "exact_phrase",
+                "confidence": 1.0,
+            }
+        }
+
+        output_path = str(self.media_root / "styled_out.pdf")
+        warnings = []
+        ok = PipelineService()._create_output_pdf(
+            layout,
+            translations,
+            output_path,
+            layout_warnings=warnings,
+        )
+        self.assertTrue(ok)
+
+        doc = fitz.open(output_path)
+        try:
+            page_text = doc[0].get_text()
+            spans = [
+                span
+                for block in doc[0].get_text("dict").get("blocks", [])
+                for line in block.get("lines", [])
+                for span in line.get("spans", [])
+                if "Styled target" in span.get("text", "")
+            ]
+        finally:
+            doc.close()
+
+        self.assertIn("Styled target", page_text)
+        self.assertNotIn("[UNKNOWN_FOR_REVIEW]", page_text)
+        self.assertTrue(spans)
+        self.assertGreaterEqual(float(spans[0].get("size", 0)), 14.0)
+
 
 class TranslatorNeuralPreviewDisplayTests(TestCase):
     """Preview UI must surface ByT5 output distinctly without fabricating
@@ -8265,6 +8806,7 @@ class AppendixKBilingualPreviewUXTests(TestCase):
         self.assertNotIn("View Segment Details", body)
         self.assertNotIn("byt5_neural", body)
         self.assertNotIn("Technical Details", body)
+        self.assertNotIn("OCR Confidence", body)
         self.assertNotIn("badge-method", body)
 
 
