@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Home - FSL Photo Recognition{% endblock %}
+
+{% block content %}
+<section class="hero card">
+    <h1>Filipino Sign Language Photo Recognition System</h1>
+    <p class="lead">
+        Upload a photo of a hand sign and let the system predict the matching
+        Filipino Sign Language (FSL) letter, word, or gesture. This system
+        recognizes signs from <strong>uploaded photos only</strong> &mdash;
+        no live camera or video is required.
+    </p>
+
+    <div class="hero-actions">
+        {% if user.is_authenticated %}
+            <a href="{% url 'recognize' %}" class="btn btn-primary">Start Recognition</a>
+            <a href="{% url 'history' %}" class="btn btn-secondary">View History</a>
+        {% else %}
+            <a href="{% url 'login' %}" class="btn btn-secondary">Login</a>
+            <a href="{% url 'register' %}" class="btn btn-primary">Register</a>
+            <a href="{% url 'login' %}?next={% url 'recognize' %}" class="btn btn-accent">Start Recognition</a>
+        {% endif %}
+    </div>
+</section>
+
+<section class="how-it-works">
+    <h2>How it works</h2>
+    <div class="card-grid">
+        <div class="card">
+            <h3>1. Upload</h3>
+            <p>Take or choose a clear photo of a hand sign (JPG, JPEG, or PNG).</p>
+        </div>
+        <div class="card">
+            <h3>2. Recognize</h3>
+            <p>The system analyzes the photo and predicts the most likely FSL sign.</p>
+        </div>
+        <div class="card">
+            <h3>3. Review</h3>
+            <p>See the predicted sign, a confidence score, and a short explanation.</p>
+        </div>
+    </div>
+</section>
+{% endblock %}

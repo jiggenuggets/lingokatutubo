@@ -1,0 +1,429 @@
+/* Filipino Sign Language Photo Recognition System - main stylesheet
+   Color palette: white background, blue for primary actions, green for accents/success. */
+
+:root {
+    --color-blue: #1565c0;
+    --color-blue-dark: #0d47a1;
+    --color-green: #2e7d32;
+    --color-green-dark: #1b5e20;
+    --color-white: #ffffff;
+    --color-bg: #f4f8fb;
+    --color-text: #1c2733;
+    --color-border: #d7e3ec;
+    --color-danger: #c62828;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    line-height: 1.5;
+}
+
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+}
+
+/* Header */
+.site-header {
+    background-color: var(--color-white);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 1rem 1.5rem;
+}
+
+.brand {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--color-blue-dark);
+    text-decoration: none;
+}
+
+.nav-links {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.nav-links a {
+    color: var(--color-text);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.nav-links a:hover {
+    color: var(--color-blue);
+}
+
+.nav-user {
+    color: var(--color-green-dark);
+    font-weight: 600;
+}
+
+.inline-form {
+    display: inline;
+}
+
+.link-button {
+    background: none;
+    border: none;
+    color: var(--color-text);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+}
+
+.link-button:hover {
+    color: var(--color-blue);
+}
+
+/* Page layout */
+.page-content {
+    padding: 2rem 1.5rem 3rem;
+    min-height: 70vh;
+}
+
+.site-footer {
+    background-color: var(--color-white);
+    border-top: 1px solid var(--color-border);
+    padding: 1.25rem 0;
+    text-align: center;
+    color: #5b6b79;
+    font-size: 0.9rem;
+}
+
+/* Cards */
+.card {
+    background-color: var(--color-white);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: 1.75rem;
+    box-shadow: 0 2px 6px rgba(21, 101, 192, 0.06);
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+/* Home / hero */
+.hero {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.hero h1 {
+    color: var(--color-blue-dark);
+    margin-top: 0;
+}
+
+.lead {
+    font-size: 1.05rem;
+    color: #3c4a58;
+}
+
+.hero-actions {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.how-it-works h2 {
+    text-align: center;
+    color: var(--color-green-dark);
+}
+
+/* Buttons */
+.btn {
+    display: inline-block;
+    padding: 0.65rem 1.4rem;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    font-size: 0.95rem;
+}
+
+.btn-small {
+    padding: 0.4rem 0.9rem;
+    font-size: 0.85rem;
+}
+
+.btn-block {
+    display: block;
+    width: 100%;
+    text-align: center;
+}
+
+.btn-primary {
+    background-color: var(--color-blue);
+    color: var(--color-white);
+}
+
+.btn-primary:hover {
+    background-color: var(--color-blue-dark);
+}
+
+.btn-secondary {
+    background-color: var(--color-white);
+    color: var(--color-blue);
+    border: 1px solid var(--color-blue);
+}
+
+.btn-secondary:hover {
+    background-color: #eaf2fb;
+}
+
+.btn-accent {
+    background-color: var(--color-green);
+    color: var(--color-white);
+}
+
+.btn-accent:hover {
+    background-color: var(--color-green-dark);
+}
+
+.btn-danger {
+    background-color: var(--color-danger);
+    color: var(--color-white);
+}
+
+.btn-danger:hover {
+    background-color: #8e1f1f;
+}
+
+/* Forms */
+.form-page {
+    display: flex;
+    justify-content: center;
+}
+
+.form-card {
+    width: 100%;
+    max-width: 480px;
+}
+
+.form-card h1 {
+    color: var(--color-blue-dark);
+    margin-top: 0;
+}
+
+.form-field {
+    margin-bottom: 1.1rem;
+}
+
+.form-field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+
+.form-field input {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 1rem;
+}
+
+.form-field input:focus {
+    outline: none;
+    border-color: var(--color-blue);
+}
+
+.field-help {
+    font-size: 0.82rem;
+    color: #5b6b79;
+    margin: 0.25rem 0 0;
+}
+
+.field-error,
+.form-errors {
+    color: var(--color-danger);
+    font-size: 0.85rem;
+}
+
+.form-errors {
+    list-style: none;
+    padding: 0;
+}
+
+.form-footer {
+    margin-top: 1.25rem;
+    text-align: center;
+    font-size: 0.92rem;
+}
+
+/* Image preview */
+.preview-box {
+    margin: 1rem 0;
+    text-align: center;
+}
+
+.preview-label {
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+}
+
+#image-preview {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+}
+
+/* Result page */
+.result-card {
+    display: flex;
+    gap: 1.75rem;
+    flex-wrap: wrap;
+}
+
+.result-image {
+    max-width: 320px;
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    height: fit-content;
+}
+
+.result-details {
+    flex: 1;
+    min-width: 240px;
+}
+
+.label {
+    font-weight: 600;
+    color: var(--color-blue-dark);
+}
+
+.predicted-sign {
+    font-size: 1.4rem;
+    color: var(--color-green-dark);
+    font-weight: 700;
+}
+
+.description {
+    background-color: var(--color-bg);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+}
+
+.timestamp {
+    color: #5b6b79;
+    font-size: 0.85rem;
+}
+
+.result-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    flex-wrap: wrap;
+}
+
+/* History */
+.history-grid {
+    margin-top: 1.5rem;
+}
+
+.history-card {
+    display: flex;
+    flex-direction: column;
+}
+
+.history-image {
+    width: 100%;
+    height: 180px;
+    object-fit: cover;
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+}
+
+.history-details p {
+    margin: 0.25rem 0;
+}
+
+.history-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.85rem;
+}
+
+.empty-state {
+    text-align: center;
+    margin-top: 2rem;
+    color: #5b6b79;
+}
+
+.confirm-delete-image {
+    max-width: 220px;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    display: block;
+    margin: 0.75rem 0;
+}
+
+.confirm-delete-form {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+/* Messages */
+.messages {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 1.25rem;
+}
+
+.message {
+    padding: 0.7rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    font-size: 0.92rem;
+}
+
+.message-success {
+    background-color: #e3f3e6;
+    color: var(--color-green-dark);
+    border: 1px solid #b9ddc0;
+}
+
+.message-error {
+    background-color: #fbe8e8;
+    color: var(--color-danger);
+    border: 1px solid #f0bcbc;
+}
+
+/* Responsive tweaks */
+@media (max-width: 600px) {
+    .header-inner {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .result-card {
+        flex-direction: column;
+    }
+}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Recognition Result - FSL Photo Recognition{% endblock %}
+
+{% block content %}
+<section class="result-page">
+    <h1>Recognition Result</h1>
+    <div class="card result-card">
+        <img src="{{ record.image.url }}" alt="Uploaded hand sign photo" class="result-image">
+        <div class="result-details">
+            <p><span class="label">Predicted Sign:</span> <span class="value predicted-sign">{{ record.predicted_sign }}</span></p>
+            <p><span class="label">Confidence Score:</span> <span class="value">{{ record.confidence_score }}%</span></p>
+            <p><span class="label">Meaning / Explanation:</span></p>
+            <p class="description">{{ record.sign_description }}</p>
+            <p class="timestamp">Uploaded on {{ record.created_at|date:"F d, Y, g:i A" }}</p>
+        </div>
+    </div>
+
+    <div class="result-actions">
+        <a href="{% url 'recognize' %}" class="btn btn-primary">Recognize Another Photo</a>
+        <a href="{% url 'history' %}" class="btn btn-secondary">View History</a>
+    </div>
+</section>
+{% endblock %}
