@@ -1,8 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-db.sqlite3
-media/
-ml_model/*.h5
-ml_model/*.keras
-.DS_Store
